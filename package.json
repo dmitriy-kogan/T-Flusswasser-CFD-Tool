@@ -1,0 +1,16 @@
+{
+  "name": "t-flusswasser-cfd-tool",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.128.0"
+  },
+  "devDependencies": {
+    "vite": "^4.5.3"
+  }
+}

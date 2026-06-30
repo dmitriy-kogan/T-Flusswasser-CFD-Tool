@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flusswasserwärmepumpe – Interaktives 3D-CFD-Tool</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Flusswasserwärmepumpe · 3D-CFD-Simulation</h1>
+      <span class="sub">vereinfachtes hydraulisch-thermisches Advektions-Diffusions-Modell</span>
+      <span class="spacer"></span>
+      <span class="views">
+        <button data-view="top">Draufsicht</button>
+        <button data-view="side">Seitenansicht</button>
+        <button data-view="oblique">Schräg</button>
+        <button data-view="reset">Reset</button>
+      </span>
+    </header>
+
+    <!-- ====================== STEUERUNG ====================== -->
+    <div id="sidebar">
+      <div class="group">
+        <h2>Strömung &amp; Fluss</h2>
+        <div class="body">
+          <div class="ctrl" data-p="vFlow">
+            <div class="row"><label>Strömungsgeschwindigkeit</label><span class="val"></span></div>
+            <input type="range" min="0.1" max="2.0" step="0.05" value="0.5">
+          </div>
+          <div class="ctrl" data-p="depth">
+            <div class="row"><label>Max. Wassertiefe (Flussmitte)</label><span class="val"></span></div>
+            <input type="range" min="1" max="10" step="0.1" value="5">
+          </div>
+          <div class="ctrl" data-p="tIn">
+            <div class="row"><label>Flusswassertemperatur</label><span class="val"></span></div>
+            <input type="range" min="0" max="25" step="0.1" value="8">
+          </div>
+          <div class="derived" id="derivedFlow"></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Wärmepumpe</h2>
+        <div class="body">
+          <div class="ctrl" data-p="power">
+            <div class="row"><label>Thermische Leistung</label><span class="val"></span></div>
+            <input type="range" min="0" max="20000" step="50" value="500">
+          </div>
+          <div class="ctrl" data-p="vSuct">
+            <div class="row"><label>Ansauggeschwindigkeit (Rohr)</label><span class="val"></span></div>
+            <input type="range" min="0.5" max="3.0" step="0.05" value="1.5">
+          </div>
+          <div class="ctrl" data-p="dPipe">
+            <div class="row"><label>Rohrdurchmesser (Ein-/Auslass)</label><span class="val"></span></div>
+            <input type="range" min="0.2" max="2.0" step="0.05" value="0.8">
+          </div>
+          <div class="derived" id="derivedPump"></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Schnittebenen</h2>
+        <div class="body">
+          <div class="ctrl" data-p="xCut">
+            <div class="row"><label>Querschnitt x-Position</label><span class="val"></span></div>
+            <input type="range" min="0" max="300" step="2" value="120">
+          </div>
+          <div class="ctrl" data-p="yLong">
+            <div class="row"><label>Längsschnitt y-Position</label><span class="val"></span></div>
+            <input type="range" min="0" max="50" step="0.5" value="6">
+          </div>
+          <div class="ctrl" data-p="zCut">
+            <div class="row"><label>Horizontalschnitt Tiefe</label><span class="val"></span></div>
+            <input type="range" min="0" max="10" step="0.1" value="1.5">
+          </div>
+        </div>
+      </div>
+
+      <div class="group">
+        <h2>Anzeige</h2>
+        <div class="body">
+          <div class="toggles">
+            <label class="tg"><input type="checkbox" id="t_cross" checked>Querschnitt</label>
+            <label class="tg"><input type="checkbox" id="t_long">Längsschnitt</label>
+            <label class="tg"><input type="checkbox" id="t_horiz">Horizontalschnitt</label>
+            <label class="tg"><input type="checkbox" id="t_stream" checked>Stromlinien (Partikel)</label>
+            <label class="tg"><input type="checkbox" id="t_vec">Geschw.-Vektoren</label>
+            <label class="tg"><input type="checkbox" id="t_iso">Isothermen</label>
+            <label class="tg"><input type="checkbox" id="t_flow">Strömungs-Isolinien</label>
+            <label class="tg"><input type="checkbox" id="t_water" checked>Wasservolumen</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====================== 3D-SZENE ====================== -->
+    <div id="viewport">
+      <div id="scene"></div>
+      <div id="legend">
+        <div class="title">T [°C]</div>
+        <canvas id="cbar" width="18" height="170"></canvas>
+        <div class="ticks" id="cbarTicks"></div>
+      </div>
+      <div id="kpi">
+        <h3>Kennzahlen</h3>
+        <table><tbody id="kpiBody"></tbody></table>
+        <div id="warn"></div>
+      </div>
+      <div id="err"></div>
+      <div id="hud"></div>
+    </div>
+
+    <!-- ====================== DIAGRAMME ====================== -->
+    <div id="charts">
+      <div class="chart"><div class="ct">T(x) – Mittellinie &amp; Pumpenufer [°C]</div><canvas id="chTx"></canvas></div>
+      <div class="chart"><div class="ct">T(y) – Querschnitt [°C]</div><canvas id="chTy"></canvas></div>
+      <div class="chart"><div class="ct">v(z) – Geschwindigkeitsprofil über Tiefe [m/s]</div><canvas id="chVz"></canvas></div>
+      <div class="chart"><div class="ct">T(Tiefe) – vertikales Profil [°C]</div><canvas id="chTz"></canvas></div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
