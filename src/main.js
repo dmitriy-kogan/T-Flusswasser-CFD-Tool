@@ -764,7 +764,7 @@ const suctParticles=new THREE.Points(suctGeo,
 suctParticles.frustumCulled=false; scene.add(suctParticles);
 function seedSuct(n){
   // überwiegend STROMAUF der Mündung säen (die Strömung trägt die Partikel heran),
-  // der Rest ringsum in der Kugelschale; Radien weit gestreut -> keine scharfe Zone
+  // der Rest ringsum in der Kugelschale; Radien breit gestreut -> keine scharfe Zone
   const zp=pipeZ();
   sEsc[n]=X_IN + SUCT_R*(0.6+1.8*Math.random());       // zufällige Auslaufgrenze stromab
   for(let tries=0;tries<14;tries++){

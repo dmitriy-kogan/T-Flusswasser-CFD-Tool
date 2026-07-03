@@ -76,10 +76,11 @@ button:hover{background:#243648;border-color:var(--accent)}
 
 /* Charts */
 #charts{grid-area:3 / 1 / 4 / 2;display:grid;grid-template-columns:repeat(4,1fr);
-  gap:1px;background:var(--line);border-top:1px solid var(--line)}
-.chart{background:var(--panel2);display:flex;flex-direction:column;padding:6px 8px}
-.chart .ct{font-size:10.5px;color:var(--muted);margin-bottom:2px}
-.chart canvas{flex:1;width:100%}
+  gap:1px;background:var(--line);border-top:1px solid var(--line);min-height:0}
+.chart{background:var(--panel2);display:flex;flex-direction:column;padding:6px 8px;
+  min-height:0;min-width:0;overflow:hidden}
+.chart .ct{font-size:10.5px;color:var(--muted);margin-bottom:2px;flex:0 0 auto}
+.chart canvas{flex:1 1 0;width:100%;height:100%;min-height:0;display:block}
 
 #err{position:absolute;inset:14px 14px auto 14px;max-height:60%;overflow:auto;
   background:rgba(40,12,12,.94);border:1px solid var(--warn);border-radius:8px;
