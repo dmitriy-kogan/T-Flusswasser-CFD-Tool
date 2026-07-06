@@ -30,14 +30,14 @@ const P = {
   cop:   4.0,   // Leistungszahl (COP) der Wärmepumpe [-]
   vSuct: 1.5,   // Ansauggeschwindigkeit im Rohr [m/s]
   dPipe: 0.8,   // Rohrdurchmesser [m]
-  xCut:  120,   // Querschnittsposition [m]
+  xCut:  220,   // Querschnittsposition [m]
   zCut:  1.5,   // Horizontalschnitt-Tiefe [m unter Oberfläche]
   yLong: 6      // Längsschnitt y-Position (quer zur Strömung) [m]
 };
 
 /* Geometrie des Flussabschnitts */
-const L = 300, W = 50;                 // Länge (x), Breite (y) [m]
-const X_IN = 20, X_OUT = 120;          // Position Einlass / Auslass [m]
+const L = 400, W = 50;                 // Länge (x), Breite (y) [m]  (100 m Vorlauf vor dem Einlass)
+const X_IN = 120, X_OUT = 220;         // Position Einlass / Auslass [m]
 const Y_BANK = 6;                      // Abstand der Rohrmündung vom Pumpenufer (y=0) [m]
 const RHO = 1000, CP = 4186;           // Wasser: Dichte, spez. Wärmekapazität
 const NU = 1.3e-6;                     // kinematische Viskosität [m²/s]
@@ -55,7 +55,7 @@ const ZSURF = () => WSURF;                                  // Wasseroberfläche
 function pipeZ(){ return Math.max(WSURF - 0.5, bedZ(Y_BANK) + 0.2); }
 
 /* Rechengitter (gröber für Echtzeit) */
-const NX = 120, NY = 26, NZ = 8;
+const NX = 160, NY = 26, NZ = 8;
 const dx = L / NX, dy = W / NY;
 const NC = NX * NY * NZ;
 
@@ -351,9 +351,66 @@ function buildEnv(){
       board.position.set(x, WSURF+7.8, z);   // Tafel oben auf dem Pfosten
       envGroup.add(board);
     };
-    [0,100,200,300].forEach(x=>mkSign(x+' m', x, -4));
+    [0,100,200,300,400].forEach(x=>mkSign(x+' m', x, -4));
   }
-  {const s=textSprite('Breite 50 m');s.position.set(-16,WSURF+2,W/2);envGroup.add(s);}
+  // Wohnbebauung auf der Pumpenseite (für spätere Fernwärme-Anschlüsse):
+  // Mehrfamilienhäuser (groß, Flachdach) und Einzelhäuser (klein, Spitzdach),
+  // jeweils mit Fenstern und Tür auf der Flussseite (Fassaden-Textur)
+  {
+    const wallM=new THREE.MeshLambertMaterial({color:0xb9b2a6});
+    const wallE=new THREE.MeshLambertMaterial({color:0xc9bfa8});
+    const roofF=new THREE.MeshLambertMaterial({color:0x4a5560});   // Flachdach
+    const roofS=new THREE.MeshLambertMaterial({color:0x8a4a3a});   // Spitzdach (Ziegel)
+    // Fassade: Fenstergitter + Tür auf transparenter Canvas -> Ebene knapp vor der Wand
+    const mkFacade=(wx,h,floors,cols,x,y,z)=>{
+      const c=document.createElement('canvas'); c.width=256; c.height=256;
+      const ctx=c.getContext('2d');
+      const cw=256/cols, ch=256/(floors+0.4);
+      for(let f=0;f<floors;f++)for(let k=0;k<cols;k++){
+        // Erdgeschoss Mitte: Tür statt Fenster
+        const ground=(f===floors-1), mid=(k===(cols>>1));
+        if(ground&&mid){
+          ctx.fillStyle='#4b3a28';
+          ctx.fillRect(k*cw+cw*0.28, (f+0.18)*ch+ch*0.10, cw*0.44, ch*0.9);
+        }else{
+          ctx.fillStyle='#cfe4f5';
+          ctx.fillRect(k*cw+cw*0.22, (f+0.18)*ch+ch*0.16, cw*0.56, ch*0.55);
+          ctx.strokeStyle='#5c7186'; ctx.lineWidth=3;
+          ctx.strokeRect(k*cw+cw*0.22, (f+0.18)*ch+ch*0.16, cw*0.56, ch*0.55);
+        }
+      }
+      const m=new THREE.Mesh(new THREE.PlaneGeometry(wx-0.6,h-0.4),
+        new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(c),transparent:true}));
+      m.position.set(x, y, z);                     // knapp vor der flussseitigen Wand (+z)
+      envGroup.add(m);
+    };
+    // Mehrfamilienhaus: großer Quader + Flachdach-Platte + Fassade
+    const mkMFH=(x,z,wx,wz,h)=>{
+      const b=new THREE.Mesh(new THREE.BoxGeometry(wx,h,wz),wallM);
+      b.position.set(x,WSURF+h/2,z); envGroup.add(b);
+      const r=new THREE.Mesh(new THREE.BoxGeometry(wx+0.8,0.7,wz+0.8),roofF);
+      r.position.set(x,WSURF+h+0.35,z); envGroup.add(r);
+      mkFacade(wx,h,Math.max(3,Math.round(h/3.4)),Math.max(4,Math.round(wx/4.5)),
+               x, WSURF+h/2, z+wz/2+0.05);
+    };
+    // Einzelhaus: kleiner Quader + Pyramidendach + Fassade (1 Etage: 2 Fenster + Tür)
+    const mkEFH=(x,z)=>{
+      const b=new THREE.Mesh(new THREE.BoxGeometry(9,5,8),wallE);
+      b.position.set(x,WSURF+2.5,z); envGroup.add(b);
+      const r=new THREE.Mesh(new THREE.ConeGeometry(6.6,3.4,4),roofS);
+      r.rotation.y=Math.PI/4;                       // Pyramide über den rechteckigen Grundriss
+      r.position.set(x,WSURF+5+1.7,z); envGroup.add(r);
+      mkFacade(9,5,1,3, x, WSURF+2.5, z+4+0.05);
+    };
+    // Mehrfamilienhäuser (stromauf der Pumpe)
+    mkMFH( 40,-30, 26,12,14);
+    mkMFH( 78,-32, 22,12,11);
+    // Einzelhäuser (stromab der Pumpe)
+    mkEFH(255,-27);
+    mkEFH(285,-30);
+    mkEFH(320,-26);
+    mkEFH(355,-30);
+  }
   // Strömungsrichtung: flacher 50-m-Pfeil auf dem Rasen (gegenüberliegendes Ufer),
   // daneben die Beschriftung "Strömungsrichtung" – beides liegend, entlang des Flusses
   {
@@ -410,7 +467,7 @@ function buildWater(){
 
 /* Pumpengebäude + geschlossener Rohrkreislauf (Fluss → Pumpe → Fluss) */
 const pumpGroup=new THREE.Group(); scene.add(pumpGroup);
-let capIn=null, capOut=null;
+
 // Kreislaufpfad (Polylinie) für die Partikel im Rohr
 let circuitPath=[], circuitPumpIdx=0, circuitCum=[], circuitTotal=1, pipeRadius=0.4;
 function buildCircuitLengths(){
@@ -499,11 +556,13 @@ function buildPump(){
     wallText('FW-Rücklauf','#123f9e', xMid-4, by+5.6);
   }
 
-  const r=Math.max(P.dPipe/2,0.15);  pipeRadius=r;
+  const r=Math.max(P.dPipe/2,0.15);
+  const rVis=r*1.8;                    // sichtbarer Rohrradius: dicker, damit das Rohr Volumen hat
+  pipeRadius=rVis;
   const zp=pipeZ();                  // Mündungstiefe ≈ 0,5 m unter der Oberfläche
   // durchsichtige Rohre, damit man die Partikel im Inneren über die ganze Länge sieht
-  const matIn =new THREE.MeshPhongMaterial({color:0x8fc0e6,shininess:50,transparent:true,opacity:0.22,depthWrite:false,side:THREE.DoubleSide});
-  const matOut=new THREE.MeshPhongMaterial({color:0x6f9bff,shininess:50,transparent:true,opacity:0.22,depthWrite:false,side:THREE.DoubleSide});
+  const matIn =new THREE.MeshPhongMaterial({color:0x8fc0e6,shininess:50,transparent:true,opacity:0.30,depthWrite:false,side:THREE.DoubleSide});
+  const matOut=new THREE.MeshPhongMaterial({color:0x6f9bff,shininess:50,transparent:true,opacity:0.30,depthWrite:false,side:THREE.DoubleSide});
   // Entnahme (Mündung im Wasser → Pumpe): senkrechtes Eintauchen, dann erhöht zur Wandmitte
   const inPath =[
     V(X_IN,     zp,    Y_BANK),       // Mündung: Rohr endet ~0,5 m tief im Wasser
@@ -518,17 +577,12 @@ function buildPump(){
     V(X_OUT,    by+5,  Y_BANK),       // erhöht über das Wasser
     V(X_OUT,    zp,    Y_BANK)        // Mündung: Rohr endet ~0,5 m tief im Wasser
   ];
-  pumpGroup.add(tubePath(inPath, r, matIn));
-  pumpGroup.add(tubePath(outPath,r, matOut));
+  pumpGroup.add(tubePath(inPath, rVis, matIn));
+  pumpGroup.add(tubePath(outPath,rVis, matOut));
   // vollständiger Kreislaufpfad durch die Pumpe (für die Kreislauf-Partikel)
   circuitPath = inPath.concat([V(xMid, by+5, bz)], outPath);
   circuitPumpIdx = inPath.length;     // ab hier ist das Medium abgekühlt
   buildCircuitLengths();
-  // Mündungs-Marker (werden je Frame nach Temperatur eingefärbt)
-  capIn =new THREE.Mesh(new THREE.SphereGeometry(r*1.4,12,12),new THREE.MeshBasicMaterial({color:0xffffff}));
-  capIn.position.copy(inPath[0]); pumpGroup.add(capIn);
-  capOut=new THREE.Mesh(new THREE.SphereGeometry(r*1.4,12,12),new THREE.MeshBasicMaterial({color:0xffffff}));
-  capOut.position.copy(outPath[outPath.length-1]); pumpGroup.add(capOut);
 }
 
 /* =========================================================================
@@ -667,7 +721,7 @@ const circGeo=new THREE.BufferGeometry();
 circGeo.setAttribute('position',new THREE.BufferAttribute(cpPos,3));
 circGeo.setAttribute('color',new THREE.BufferAttribute(cpCol,3));
 const circParticles=new THREE.Points(circGeo,
-  new THREE.PointsMaterial({size:2.25,map:DISC,alphaTest:0.35,vertexColors:true,transparent:true,opacity:0.98,sizeAttenuation:true,depthWrite:false}));
+  new THREE.PointsMaterial({size:1.1,map:DISC,alphaTest:0.35,vertexColors:true,transparent:true,opacity:0.98,sizeAttenuation:true,depthWrite:false}));
 circParticles.frustumCulled=false; scene.add(circParticles);
 const _cp=new THREE.Vector3();
 function updateCircuit(dt){
@@ -675,7 +729,7 @@ function updateCircuit(dt){
   const coolFrac=circuitCoolFrac();
   const cWarm=colNorm(tInletLocal), cCold=colNorm(tOutlet);
   const adv=dt*0.05;                    // Vortriebsgeschwindigkeit entlang des Rohres
-  const off=pipeRadius*0.7;
+  const off=pipeRadius*0.35;   // deutlich innerhalb der (dickeren) Rohrwand
   for(let n=0;n<NCP;n++){
     cpS[n]+=adv; if(cpS[n]>=1) cpS[n]-=1;
     samplePath(cpS[n],_cp);
@@ -737,10 +791,10 @@ function updateJet(dt){
     if(jAge[n]>JET_LIFE || !(jX[n]<L) || jY[n]<0 || jY[n]>W || jZ[n]<bedZ(jY[n]) || jZ[n]>WSURF || !isFinite(jX[n]))
       seedJet(n,true);
     const o=n*3; jPos[o]=jX[n]; jPos[o+1]=jZ[n]; jPos[o+2]=jY[n];
-    // frisch = kalte Auslasstemperatur, mit dem Alter Richtung lokaler Temperatur
-    const fr=Math.min(jAge[n]/14,1);
-    const tval=tOutlet*(1-fr)+sampleT(jX[n],jY[n],jZ[n])*fr;
-    const c=colNorm(tval); jCol[o]=c.r; jCol[o+1]=c.g; jCol[o+2]=c.b;
+    // Farbe = lokale Feldtemperatur (identische Quelle wie Schnittebenen/Tracer,
+    // damit Partikel- und Ebenenfarben exakt zusammenpassen)
+    const c=colNorm(sampleT(jX[n],jY[n],jZ[n]));
+    jCol[o]=c.r; jCol[o+1]=c.g; jCol[o+2]=c.b;
   }
   jetGeo.attributes.position.needsUpdate=true;
   jetGeo.attributes.color.needsUpdate=true;
@@ -806,6 +860,129 @@ function updateSuction(dt){
   }
   suctGeo.attributes.position.needsUpdate=true;
   suctGeo.attributes.color.needsUpdate=true;
+}
+
+/* ---------------------------------------------------------------------------
+   Analoge Thermometer auf Ein- und Auslassrohr: rundes Zifferblatt (0–25 °C,
+   Skala wie die Farbskala) mit analogem Zeiger, per Canvas-Textur je Frame
+   nachgeführt. Montiert auf kurzem Standrohr über der Rohrleitung.
+   --------------------------------------------------------------------------- */
+function makeGauge(x,z,label){
+  const c=document.createElement('canvas'); c.width=c.height=256;
+  const ctx=c.getContext('2d');
+  const tex=new THREE.CanvasTexture(c);
+  const grp=new THREE.Group();
+  // Standrohr von der Rohrleitung (Höhe WSURF+5) nach oben
+  const pole=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,3.0,10),
+    new THREE.MeshLambertMaterial({color:0x6b6f75}));
+  pole.position.set(x, WSURF+5+1.5, z); grp.add(pole);
+  // Zifferblatt (beidseitig sichtbar)
+  const dial=new THREE.Mesh(new THREE.PlaneGeometry(4.6,4.6),
+    new THREE.MeshBasicMaterial({map:tex,transparent:true,side:THREE.DoubleSide}));
+  dial.position.set(x, WSURF+5+4.6, z); grp.add(dial);
+  scene.add(grp);
+  function draw(temp){
+    ctx.clearRect(0,0,256,256);
+    // Gehäuse + Blatt
+    ctx.beginPath(); ctx.arc(128,128,120,0,Math.PI*2);
+    ctx.fillStyle='#1b2734'; ctx.fill();
+    ctx.lineWidth=8; ctx.strokeStyle='#8aa0b5'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(128,128,104,0,Math.PI*2);
+    ctx.fillStyle='#eef3f8'; ctx.fill();
+    // Skala 0..25 °C über 240° (von -210° bis +30°, d.h. links unten -> rechts unten)
+    const a0=-Math.PI*7/6, a1=Math.PI/6;
+    for(let t=0;t<=25;t+=2.5){
+      const a=a0+(a1-a0)*t/25, big=(t%5===0);
+      const r1=big?78:88, r2=96;
+      ctx.beginPath();
+      ctx.moveTo(128+Math.cos(a)*r1,128+Math.sin(a)*r1);
+      ctx.lineTo(128+Math.cos(a)*r2,128+Math.sin(a)*r2);
+      ctx.lineWidth=big?5:2.5; ctx.strokeStyle='#33475c'; ctx.stroke();
+      if(big){
+        ctx.fillStyle='#33475c'; ctx.font='bold 20px Segoe UI'; 
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(t,128+Math.cos(a)*62,128+Math.sin(a)*62);
+      }
+    }
+    // Beschriftung
+    ctx.fillStyle='#5c7186'; ctx.font='bold 17px Segoe UI'; ctx.textAlign='center';
+    ctx.fillText(label,128,158); ctx.fillText('°C',128,178);
+    // Zeiger (analog)
+    const tv=Math.max(0,Math.min(25,temp));
+    const a=a0+(a1-a0)*tv/25;
+    ctx.beginPath();
+    ctx.moveTo(128-Math.cos(a)*16,128-Math.sin(a)*16);
+    ctx.lineTo(128+Math.cos(a)*86,128+Math.sin(a)*86);
+    ctx.lineWidth=7; ctx.lineCap='round'; ctx.strokeStyle='#d0342c'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(128,128,9,0,Math.PI*2); ctx.fillStyle='#22303c'; ctx.fill();
+    tex.needsUpdate=true;
+  }
+  draw(P.tIn);
+  return {draw, last:1e9};
+}
+const gaugeIn  = makeGauge(X_IN,  -6, 'Einlass');
+const gaugeOut = makeGauge(X_OUT, -6, 'Auslass');
+function updateGauges(){
+  // nur bei sichtbarer Änderung neu zeichnen (Canvas-Arbeit sparen)
+  if(Math.abs(gaugeIn.last -tInletLocal)>0.02){ gaugeIn.draw(tInletLocal); gaugeIn.last=tInletLocal; }
+  if(Math.abs(gaugeOut.last-tOutlet)   >0.02){ gaugeOut.draw(tOutlet);    gaugeOut.last=tOutlet; }
+}
+
+/* ---------------------------------------------------------------------------
+   Boot mit zwei Personen: gleitet in Flussmitte mit der lokalen
+   Oberflächen-Strömungsgeschwindigkeit von Modellanfang bis -ende, verschwindet
+   kurz und erscheint danach wieder am Anfang -> intuitives Gefühl für v_Fluss.
+   --------------------------------------------------------------------------- */
+const boat=new THREE.Group();
+{
+  /* Realistischer Maßstab (kleines Ruderboot):
+     Rumpf 4,2 m lang, 1,5 m breit, Bordwand 0,55 m; liegt 0,15 m tief im Wasser.
+     Personen SITZEND: Oberkörper ~0,7 m + Kopf -> Kopfhöhe ~1,3 m über Deck. */
+  const hullMat=new THREE.MeshLambertMaterial({color:0x7a4f26,side:THREE.DoubleSide});
+  // Rumpf als eine Form: flaches Heck, spitz zulaufender Bug (ExtrudeGeometry)
+  const sh=new THREE.Shape();
+  sh.moveTo(-2.1,-0.75); sh.lineTo(1.0,-0.75); sh.lineTo(2.1,0.0);
+  sh.lineTo(1.0, 0.75);  sh.lineTo(-2.1,0.75); sh.closePath();
+  const hullGeo=new THREE.ExtrudeGeometry(sh,{depth:0.55,bevelEnabled:false});
+  const hull=new THREE.Mesh(hullGeo,hullMat);
+  hull.rotation.x=-Math.PI/2; hull.position.y=0;   // Extrusion zeigt nach oben
+  boat.add(hull);
+  // Innenboden (dunkler)
+  const floorGeo=new THREE.ExtrudeGeometry(sh,{depth:0.03,bevelEnabled:false});
+  const floor=new THREE.Mesh(floorGeo,new THREE.MeshLambertMaterial({color:0x5b3a1c}));
+  floor.rotation.x=-Math.PI/2; floor.scale.set(0.86,0.86,1);
+  floor.position.y=0.08; boat.add(floor);
+  // zwei Sitzbänke quer
+  const benchMat=new THREE.MeshLambertMaterial({color:0x9a6b39});
+  for(const bx of [0.8,-1.0]){
+    const bench=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.07,1.34),benchMat);
+    bench.position.set(bx,0.34,0); boat.add(bench);
+  }
+  // zwei SITZENDE Personen (Oberkörper + Kopf, realistisch klein)
+  const headMat=new THREE.MeshLambertMaterial({color:0xe8b88a});
+  const mkPerson=(px,jacket)=>{
+    const torso=new THREE.Mesh(new THREE.CylinderGeometry(0.20,0.26,0.68,10),
+      new THREE.MeshLambertMaterial({color:jacket}));
+    torso.position.set(px,0.34+0.34,0); boat.add(torso);
+    const head=new THREE.Mesh(new THREE.SphereGeometry(0.21,10,10),headMat);
+    head.position.set(px,0.34+0.68+0.20,0); boat.add(head);
+  };
+  mkPerson( 0.8,0xc9a227);   // Person vorn (gelbe Jacke)
+  mkPerson(-1.0,0x2e7dd1);   // Person hinten (blaue Jacke)
+  scene.add(boat);
+}
+let boatX=-6, boatWaitUntil=0;
+function updateBoat(dt){
+  const now=performance.now();
+  if(boatX>L+6){                       // Modellende erreicht -> kurz warten, dann neu
+    if(!boatWaitUntil){ boatWaitUntil=now+3000; boat.visible=false; }
+    if(now>=boatWaitUntil){ boatWaitUntil=0; boatX=-6; boat.visible=true; }
+  } else {
+    velocityAt(Math.max(boatX,0), W/2, WSURF-0.3, _vel);   // Oberflächen-Strömung Flussmitte
+    boatX += Math.max(_vel.u,0.05)*dt;
+    boat.position.set(boatX, WSURF-0.15, W/2);             // liegt 0,15 m tief im Wasser
+    boat.rotation.y = 0;                                    // Bug stets stromab
+  }
 }
 
 /* Geschwindigkeitsvektoren: dichtes Pfeilfeld (Schaft + Pfeilspitze).
@@ -1204,9 +1381,9 @@ function animate(){
   updateCircuit(0.4);
   updateJet(0.4);
   updateSuction(0.4);
+  updateBoat(0.4);
+  updateGauges();
   // Rohrmündungen nach Temperatur einfärben (Auslass sichtbar kälter)
-  if(capIn){ const c=colNorm(tInletLocal); capIn.material.color.setRGB(c.r,c.g,c.b); }
-  if(capOut){ const c=colNorm(tOutlet);    capOut.material.color.setRGB(c.r,c.g,c.b); }
   if(frame%6===0){ drawColorbar(); updateKPI(); updateCharts();
     const cv=renderer.domElement, hud=document.getElementById('hud');
     if(hud) hud.textContent=`Canvas ${cv.clientWidth}×${cv.clientHeight}px · Buffer ${cv.width}×${cv.height} · `+
