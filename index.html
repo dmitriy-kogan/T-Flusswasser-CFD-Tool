@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Flusswasserwärmepumpe – Interaktives 3D-CFD-Tool</title>
+  <!-- KaTeX für die mathematischen Formeln im Report -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
   <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
@@ -93,15 +97,41 @@
           <label class="tg"><input type="checkbox" id="t_vec">Geschw.-Vektoren</label>
           <label class="tg"><input type="checkbox" id="t_iso">Isothermen</label>
           <label class="tg"><input type="checkbox" id="t_flow">Strömungs-Isolinien</label>
+          <label class="tg"><input type="checkbox" id="t_grid">Numerisches Gitter (FVM)</label>
           <label class="tg"><input type="checkbox" id="t_water" checked>Wasservolumen</label>
         </div>
+      </div>
+    </div>
+    <div class="group">
+      <h2>Report</h2>
+      <div class="body">
+        <button id="btnReport" class="bigbtn">📄 Report erstellen</button>
+        <div class="derived" style="margin-top:6px">Erzeugt einen vollständigen Bericht (Parameter,
+          Thermodynamik, Kennzahlen, Diskretisierung, 3D-Ansichten, interaktive Drehansicht,
+          Diagramme) im Reiter „Report" – von dort als PDF speicherbar.</div>
       </div>
     </div>
   </div>
 
   <!-- ====================== 3D-SZENE ====================== -->
   <div id="viewport">
+    <div id="vtabs">
+      <button id="tab3d" class="on">3D-Ansicht</button>
+      <button id="tabReport">Report</button>
+    </div>
     <div id="scene"></div>
+    <div id="report" hidden>
+      <div id="reportBar">
+        <button id="btnPdf">⬇ Als PDF herunterladen</button>
+        <span class="hint">Direkt geöffnet: Druckdialog („Als PDF speichern“). In eingebetteter Vorschau: Download als Bericht-Datei, dort drucken.</span>
+        <span class="spacer"></span>
+        <button id="btnRegen">Report neu erstellen</button>
+      </div>
+      <div id="reportScroll"><div id="reportBody">
+        <div class="rEmpty">Noch kein Report erstellt.<br><br>
+          <button class="rGen">Report jetzt erstellen</button></div>
+      </div></div>
+    </div>
     <div id="legend">
       <div class="title">T [°C]</div>
       <div class="cwrap">
@@ -120,10 +150,10 @@
 
   <!-- ====================== DIAGRAMME ====================== -->
   <div id="charts">
-    <div class="chart"><div class="ct">T(x) – Mittellinie &amp; Pumpenufer [°C]</div><canvas id="chTx"></canvas></div>
-    <div class="chart"><div class="ct">T(y) – Querschnitt [°C]</div><canvas id="chTy"></canvas></div>
-    <div class="chart"><div class="ct">v(z) – Geschwindigkeitsprofil über Tiefe [m/s]</div><canvas id="chVz"></canvas></div>
-    <div class="chart"><div class="ct">T(Tiefe) – vertikales Profil [°C]</div><canvas id="chTz"></canvas></div>
+    <div class="chart"><div class="ct"><span>T(x) – Mittellinie &amp; Pumpenufer [°C]</span><button class="exp" data-c="chTx">CSV ⬇</button></div><canvas id="chTx"></canvas></div>
+    <div class="chart"><div class="ct"><span>T(y) – Querschnitt [°C]</span><button class="exp" data-c="chTy">CSV ⬇</button></div><canvas id="chTy"></canvas></div>
+    <div class="chart"><div class="ct"><span>v(z) – Geschwindigkeitsprofil über Tiefe [m/s]</span><button class="exp" data-c="chVz">CSV ⬇</button></div><canvas id="chVz"></canvas></div>
+    <div class="chart"><div class="ct"><span>T(Tiefe) – vertikales Profil [°C]</span><button class="exp" data-c="chTz">CSV ⬇</button></div><canvas id="chTz"></canvas></div>
   </div>
 </div>
 

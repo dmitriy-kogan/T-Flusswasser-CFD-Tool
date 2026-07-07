@@ -1031,6 +1031,45 @@ function buildVectors(){
     new THREE.LineBasicMaterial({vertexColors:true,transparent:true,opacity:0.95})));
 }
 
+/* ---------------------------------------------------------------------------
+   Numerisches Gitter (räumliche Diskretisierung des Fluidvolumens):
+   - Draufsicht: NX×NY-Zellraster auf der Wasseroberfläche
+   - Querschnitt an x=xCut: Sigma-Vernetzung der Wassersäule (NY×NZ) –
+     terrainfolgende Schichten über der parabolischen Sohle
+   - Längsschnitt an y=yLong: Sigma-Schichten in Strömungsrichtung (NX×NZ)
+   --------------------------------------------------------------------------- */
+let gridGroup=new THREE.Group(); gridGroup.visible=false; scene.add(gridGroup);
+function buildGrid(){
+  gridGroup.traverse(o=>{ if(o.geometry) o.geometry.dispose(); });
+  gridGroup.clear();
+  const pts=[];
+  const zTop=WSURF+0.03;
+  // (1) Oberflächenraster: Zellkanten i (quer) und j (längs)
+  for(let i=0;i<=NX;i++){ const x=i*dx; pts.push(x,zTop,0, x,zTop,W); }
+  for(let j=0;j<=NY;j++){ const y=j*dy; pts.push(0,zTop,y, L,zTop,y); }
+  // (2) Querschnitt an x=xCut: Sigma-Schichten + vertikale Zellkanten
+  const xc=Math.min(Math.max(P.xCut,0),L)+0.06;
+  for(let k=0;k<=NZ;k++){                       // terrainfolgende Schichtlinien
+    for(let j=0;j<NY;j++){
+      const y1=j*dy, y2=(j+1)*dy;
+      const z1=bedZ(y1)+k/NZ*localDepth(y1), z2=bedZ(y2)+k/NZ*localDepth(y2);
+      pts.push(xc,z1,y1, xc,z2,y2);
+    }
+  }
+  for(let j=0;j<=NY;j++){                       // vertikale Kanten Sohle -> Oberfläche
+    const y=j*dy; pts.push(xc,bedZ(y),y, xc,WSURF,y);
+  }
+  // (3) Längsschnitt an y=yLong: Sigma-Schichten + vertikale Zellkanten
+  const yl=Math.min(Math.max(P.yLong,0.01),W-0.01);
+  const bl=bedZ(yl), dl=localDepth(yl);
+  for(let k=0;k<=NZ;k++){ const z=bl+k/NZ*dl; pts.push(0,z,yl, L,z,yl); }
+  for(let i=0;i<=NX;i++){ const x=i*dx; pts.push(x,bl,yl, x,WSURF,yl); }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pts,3));
+  gridGroup.add(new THREE.LineSegments(g,
+    new THREE.LineBasicMaterial({color:0x7fd4dd,transparent:true,opacity:0.35,depthWrite:false})));
+}
+
 /* ---- Konturlinien (Marching Squares) an der Wasseroberfläche ---- */
 // Kantentabelle: Bit bl=1, br=2, tr=4, tl=8 ; Kanten a=unten,b=rechts,c=oben,d=links
 const MS_EDGES={1:[[3,0]],2:[[0,1]],3:[[3,1]],4:[[1,2]],5:[[3,0],[1,2]],6:[[0,2]],
@@ -1164,6 +1203,7 @@ function onParamChange(p){
   // Felder Richtung neues Gleichgewicht iterieren (Rest erledigt die Schleife)
   relax(16);
   fieldStats(); buildVectors(); buildFlow();
+  if(gridGroup.visible) buildGrid();   // Gitter folgt Tiefe/Schnittpositionen
 }
 
 /* Schalter (Toggles) */
@@ -1181,6 +1221,7 @@ jetParticles.visible=document.getElementById('t_stream').checked;
 suctParticles.visible=document.getElementById('t_stream').checked;
 document.getElementById('t_water').addEventListener('change',e=>{if(waterMesh)waterMesh.visible=e.target.checked;});
 document.getElementById('t_iso').addEventListener('change',e=>{ if(!isoGroup)buildIso(); isoGroup.visible=e.target.checked; });
+document.getElementById('t_grid').addEventListener('change',e=>{ if(e.target.checked && gridGroup.children.length===0) buildGrid(); gridGroup.visible=e.target.checked; });
 document.getElementById('t_flow').addEventListener('change',e=>{ if(!flowGroup)buildFlow(); flowGroup.visible=e.target.checked; });
 
 /* Ansichten */
@@ -1329,7 +1370,394 @@ function updateCharts(){
   const tz=[]; const dlB=localDepth((jBank+0.5)*dy), bB=bedZ((jBank+0.5)*dy);
   for(let k=0;k<NZ;k++){ const z=bB+(k+0.5)/NZ*dlB; tz.push([z,T[idx(iC,jBank,k)]]); }
   lineChart(chTz,[{name:'T(z)',color:'#ff8fab',data:tz}],'Höhe z [m]','T',[bB,WSURF],[TLO,THI]);
+  // aktuelle Daten für den CSV-Export registrieren
+  EXPORTS.chTx={file:'T_x_Mittellinie_Pumpenufer', head:['x [m]','T Mittellinie [°C]','T Pumpenufer [°C]'],
+                rows:mid.map((p,i)=>[p[0],p[1],bank[i][1]])};
+  EXPORTS.chTy={file:'T_y_Querschnitt_x'+Math.round(P.xCut), head:['y [m]','T [°C]'], rows:ty};
+  EXPORTS.chVz={file:'v_z_Profil_x'+Math.round(P.xCut), head:['Höhe z [m]','v [m/s]'], rows:vz};
+  EXPORTS.chTz={file:'T_z_Profil_x'+Math.round(P.xCut), head:['Höhe z [m]','T [°C]'], rows:tz};
+  // Spezifikationen für die SVG-Diagramme des Reports (Vektorgrafik)
+  REPCHART.tx={series:[{name:'Mittellinie',color:'#1b8a94',data:mid},{name:'Pumpenufer',color:'#c77b1e',data:bank}],
+               xl:'x [m]',yl:'T [°C]',xr:[0,L],yr:[TLO,THI]};
+  REPCHART.ty={series:[{name:'T(y)',color:'#2b9e5f',data:ty}],xl:'y [m]',yl:'T [°C]',xr:[0,W],yr:[TLO,THI]};
+  REPCHART.vz={series:[{name:'v(z)',color:'#2b7bb9',data:vz}],xl:'Höhe z [m]',yl:'v [m/s]',xr:[bC,WSURF],yr:[0,vmax*1.1]};
+  REPCHART.tz={series:[{name:'T(z)',color:'#c2477d',data:tz}],xl:'Höhe z [m]',yl:'T [°C]',xr:[bB,WSURF],yr:[TLO,THI]};
 }
+const REPCHART={};
+
+/* CSV-Export der Diagrammdaten (Semikolon-getrennt, Dezimalkomma – Excel/DE) */
+const EXPORTS={};
+function exportCSV(id){
+  const e=EXPORTS[id]; if(!e) return;
+  const num=v=>(Math.round(v*10000)/10000).toString().replace('.',',');
+  const lines=[e.head.join(';')];
+  for(const r of e.rows) lines.push(r.map(num).join(';'));
+  const blob=new Blob(['\ufeff'+lines.join('\r\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download=e.file+'.csv';
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},0);
+}
+document.querySelectorAll('.chart .exp').forEach(btn=>{
+  btn.addEventListener('click',()=>exportCSV(btn.dataset.c));
+});
+
+/* =========================================================================
+   (6b) REPORT: vollständiger Bericht als zweiter Reiter, PDF via Druckdialog
+   ========================================================================= */
+const elReport=document.getElementById('report'), elScene3d=document.getElementById('scene');
+const tab3d=document.getElementById('tab3d'), tabReport=document.getElementById('tabReport');
+function showTab(which){
+  const rep=(which==='report');
+  elReport.hidden=!rep;
+  tab3d.classList.toggle('on',!rep); tabReport.classList.toggle('on',rep);
+}
+tab3d.addEventListener('click',()=>showTab('3d'));
+tabReport.addEventListener('click',()=>showTab('report'));
+
+/* 3D-Schnappschuss: Kamera positionieren, rendern, in NATIVER Renderer-Auflösung erfassen */
+function snap3d(camPos,target,w){
+  const oldPos=camera.position.clone(), oldTgt=controls.target.clone();
+  camera.position.copy(camPos); controls.target.copy(target);
+  camera.lookAt(target); controls.update();
+  renderer.render(scene,camera);
+  const src=renderer.domElement;
+  const cw=Math.min(w||src.width, src.width), chh=Math.round(cw*src.height/src.width);
+  const c=document.createElement('canvas'); c.width=cw; c.height=chh;
+  c.getContext('2d').drawImage(src,0,0,cw,chh);
+  const url=c.toDataURL('image/jpeg',0.88);
+  camera.position.copy(oldPos); controls.target.copy(oldTgt);
+  camera.lookAt(oldTgt); controls.update();
+  return url;
+}
+
+/* SVG-Liniendiagramm (Vektorgrafik für den Report – gestochen scharf in Ansicht und PDF) */
+function svgChart(spec){
+  const W0=860,H0=300,m={l:56,r:16,t:14,b:42};
+  const pw=W0-m.l-m.r, ph=H0-m.t-m.b;
+  const [x0,x1]=spec.xr,[y0,y1]=spec.yr;
+  const X=v=>m.l+(v-x0)/(x1-x0)*pw, Y=v=>m.t+ph-(v-y0)/(y1-y0)*ph;
+  const nf=v=>{const r=Math.round(v*100)/100;return r.toString().replace('.',',');};
+  let s=`<svg class="rsvg" viewBox="0 0 ${W0} ${H0}" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI,Arial,sans-serif">`;
+  s+=`<rect x="${m.l}" y="${m.t}" width="${pw}" height="${ph}" fill="#fdfefe" stroke="#8aa0b5" stroke-width="1.2"/>`;
+  for(let g=0;g<=4;g++){
+    const gy=m.t+ph*g/4, vy=y1-(y1-y0)*g/4;
+    const gx=m.l+pw*g/4, vx=x0+(x1-x0)*g/4;
+    if(g>0&&g<4){
+      s+=`<line x1="${m.l}" y1="${gy}" x2="${m.l+pw}" y2="${gy}" stroke="#dde5ec"/>`;
+      s+=`<line x1="${gx}" y1="${m.t}" x2="${gx}" y2="${m.t+ph}" stroke="#dde5ec"/>`;
+    }
+    s+=`<text x="${m.l-7}" y="${gy+4}" text-anchor="end" font-size="12" fill="#33475c">${nf(vy)}</text>`;
+    s+=`<text x="${gx}" y="${m.t+ph+17}" text-anchor="middle" font-size="12" fill="#33475c">${nf(vx)}</text>`;
+  }
+  s+=`<text x="${m.l+pw/2}" y="${H0-8}" text-anchor="middle" font-size="12.5" fill="#33475c">${spec.xl}</text>`;
+  s+=`<text x="15" y="${m.t+ph/2}" text-anchor="middle" font-size="12.5" fill="#33475c" transform="rotate(-90 15 ${m.t+ph/2})">${spec.yl}</text>`;
+  spec.series.forEach((se,si)=>{
+    const ptsS=se.data.map(p=>`${X(p[0]).toFixed(1)},${Y(Math.max(y0,Math.min(y1,p[1]))).toFixed(1)}`).join(' ');
+    s+=`<polyline points="${ptsS}" fill="none" stroke="${se.color}" stroke-width="2.2" stroke-linejoin="round"/>`;
+    if(spec.series.length>1){
+      const lx=m.l+12, ly=m.t+16+si*18;
+      s+=`<line x1="${lx}" y1="${ly-4}" x2="${lx+22}" y2="${ly-4}" stroke="${se.color}" stroke-width="2.5"/>`;
+      s+=`<text x="${lx+28}" y="${ly}" font-size="12.5" fill="#33475c">${se.name}</text>`;
+    }
+  });
+  return s+'</svg>';
+}
+/* Drehansicht: Frames rund um das Modell (2 Zoomstufen) für interaktives Drehen/Zoomen */
+let TT={frames:[],rings:2,perRing:28,ring:0,idx:0};
+function captureTurntable(){
+  TT.frames=[]; 
+  const cx=L/2, cy=WSURF*0.5, cz=W/2;
+  const fov=camera.fov*Math.PI/180;
+  const base=(L*0.6)/Math.tan(fov/2)/Math.max(camera.aspect,1)+120;
+  const radii=[base*0.92, base*0.55], heights=[base*0.5, base*0.3];
+  for(let r=0;r<TT.rings;r++){
+    for(let i=0;i<TT.perRing;i++){
+      const a=i/TT.perRing*Math.PI*2;
+      const pos=new THREE.Vector3(cx+Math.cos(a)*radii[r], heights[r], cz+Math.sin(a)*radii[r]);
+      TT.frames.push(snap3d(pos,new THREE.Vector3(cx,cy,cz),1400));
+    }
+  }
+}
+function ttSrc(){ return TT.frames[TT.ring*TT.perRing+TT.idx]; }
+
+const RLBL={vFlow:'Strömungsgeschwindigkeit',depth:'Max. Wassertiefe (Flussmitte)',tIn:'Flusswassertemperatur',
+  power:'Thermische Heizleistung',cop:'Leistungszahl (COP)',vSuct:'Ansauggeschwindigkeit (Rohr)',
+  dPipe:'Rohrdurchmesser (Ein-/Auslass)',xCut:'Querschnitt x-Position',zCut:'Horizontalschnitt-Tiefe',yLong:'Längsschnitt y-Position'};
+function rRow(k){ return `<tr><td>${RLBL[k]}</td><td>${fmt(P[k],DEC[k])}${UNIT[k]}</td></tr>`; }
+
+function generateReport(){
+  // Helfer für LaTeX: deutsches Dezimalkomma ohne Abstand ({,}), Leistung mit Einheit
+  const mnum=s=>String(s).replace(/,/g,'{,}');
+  const mpow=kW=>(kW>=1000)?mnum(fmt(kW/1000,2))+'\\ \\mathrm{MW}':mnum(fmt(kW,0))+'\\ \\mathrm{kW}';
+  // aktuelle Anzeigen einsammeln
+  const kpiHTML=document.getElementById('kpiBody').innerHTML;
+  const warnHTML=document.getElementById('warn').innerHTML;
+  // 3D-Ansichten (Kamera wird danach wiederhergestellt)
+  const cx=L/2, cy=WSURF*0.5, cz=W/2;
+  const fov=camera.fov*Math.PI/180;
+  const fit=(L*0.6)/Math.tan(fov/2)/Math.max(camera.aspect,1)+120;
+  const tgt=new THREE.Vector3(cx,cy,cz);
+  const vOblique=snap3d(new THREE.Vector3(cx-fit*0.55,fit*0.5,cz+fit*0.7),tgt);
+  const vTop    =snap3d(new THREE.Vector3(cx,fit*0.9,cz+0.1),tgt);
+  const vSide   =snap3d(new THREE.Vector3(cx,30,cz+fit),tgt);
+  const vOutlet =snap3d(new THREE.Vector3(X_OUT-45,38,Y_BANK+62),new THREE.Vector3(X_OUT+18,WSURF-2,Y_BANK+8));
+  // Gitteransicht: Gitter temporär einblenden
+  const gridWas=gridGroup.visible;
+  if(gridGroup.children.length===0) buildGrid();
+  gridGroup.visible=true;
+  const vGrid=snap3d(new THREE.Vector3(P.xCut-60,34,W+58),new THREE.Vector3(P.xCut+10,WSURF-3,W/2));
+  gridGroup.visible=gridWas;
+  // Drehansicht erfassen
+  captureTurntable();
+  renderer.render(scene,camera);   // Live-Bild wiederherstellen
+
+  const Qriver=(2/3)*W*P.depth*P.vFlow;
+  const dTmix=(D.Pextract*1000)/(RHO*CP*Math.max(Qriver,1e-6));
+  const now=new Date();
+  const dstr=now.toLocaleDateString('de-DE',{day:'2-digit',month:'2-digit',year:'numeric'})+', '+
+             now.toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'})+' Uhr';
+
+  const secs=[['s1','1. Zusammenfassung'],['s2','2. Eingangsparameter'],['s3','3. Thermodynamik der Wärmepumpe'],
+    ['s4','4. Hydraulik & dimensionslose Kennzahlen'],['s5','5. Numerisches Modell & räumliche Diskretisierung'],
+    ['s6','6. 3D-Ansichten der Berechnung'],['s7','7. Interaktive 3D-Ansicht'],
+    ['s8','8. Ergebnisdiagramme'],['s9','9. Kennzahlen (vollständig)'],['s10','10. Hinweise & Modellgrenzen'],
+    ['s11','11. Mathematische Modellbeschreibung']];
+
+  document.getElementById('reportBody').innerHTML=`
+    <h1>Flusswasserwärmepumpe – Simulationsbericht</h1>
+    <div class="rsub">3D-CFD-Simulation (vereinfachtes hydraulisch-thermisches Advektions-Diffusions-Modell) · erstellt am ${dstr}</div>
+
+    <h2>Inhaltsverzeichnis</h2>
+    <div class="toc">${secs.map(s=>`<a data-t="${s[0]}" href="#${s[0]}">${s[1]}</a>`).join('')}</div>
+
+    <div class="sec"><h2 id="s1">1. Zusammenfassung</h2>
+    <p>Untersucht wird die Rückwirkung einer Flusswasserwärmepumpe (thermische Heizleistung
+    <b>${powMW()}</b>, COP <b>${fmt(P.cop,1)}</b>) auf einen ${L} m langen, ${W} m breiten Flussabschnitt
+    (max. Tiefe ${fmt(P.depth,1)} m, mittlere Strömungsgeschwindigkeit ${fmt(P.vFlow,2)} m/s,
+    Wassertemperatur ${fmt(P.tIn,1)} °C). Dem Fluss werden <b>${fmtPow(D.Pextract)}</b> entzogen;
+    das Rückgabewasser ist um <b>${fmt(D.dT,2)} K</b> kälter (Auslasstemperatur ${fmt(tOutlet,2)} °C).
+    Vollständig durchmischt entspricht dies einer Abkühlung des Flusses um <b>${fmt(dTmix,3)} K</b>.</p></div>
+
+    <div class="sec"><h2 id="s2">2. Eingangsparameter</h2>
+    <h3>Strömung &amp; Fluss</h3>
+    <table class="rt">${['vFlow','depth','tIn'].map(rRow).join('')}</table>
+    <h3>Wärmepumpe</h3>
+    <table class="rt">${['power','cop','vSuct','dPipe'].map(rRow).join('')}</table>
+    <h3>Schnittebenen (Auswertepositionen)</h3>
+    <table class="rt">${['xCut','yLong','zCut'].map(rRow).join('')}</table>
+    <table class="rt"><tr><td>Position Einlass (Ansaugung)</td><td>x = ${X_IN} m</td></tr>
+    <tr><td>Position Auslass (Rückgabe)</td><td>x = ${X_OUT} m</td></tr>
+    <tr><td>Abstand Rohrmündungen vom Ufer</td><td>y = ${Y_BANK} m</td></tr></table></div>
+
+    <div class="sec"><h2 id="s3">3. Thermodynamik der Wärmepumpe</h2>
+    <p>Die thermische Heizleistung P<sub>heiz</sub> (Nutzwärme für das Fernwärmenetz) setzt sich aus der
+    dem Fluss entzogenen Wärme und der elektrischen Kompressorleistung zusammen, gekoppelt über die
+    Leistungszahl (COP):</p>
+    <div class="frm">$$P_{\\mathrm{el}}=\\frac{P_{\\mathrm{heiz}}}{\\mathrm{COP}}
+    =\\frac{${mnum(fmt(P.power/1000,2))}\\ \\mathrm{MW}}{${mnum(fmt(P.cop,1))}}=${mpow(D.Pel)}$$
+    $$P_{\\mathrm{entzug}}=P_{\\mathrm{heiz}}\\cdot\\left(1-\\frac{1}{\\mathrm{COP}}\\right)=${mpow(D.Pextract)}$$
+    $$\\text{Kontrolle:}\\quad P_{\\mathrm{el}}+P_{\\mathrm{entzug}}=P_{\\mathrm{heiz}}\\;\\checkmark$$</div>
+    <p>Die Temperaturabsenkung des durch die Pumpe geförderten Wassers folgt aus der Energiebilanz:</p>
+    <div class="frm">$$\\Delta T=\\frac{P_{\\mathrm{entzug}}}{\\rho\\; c_p\\; Q}
+    =\\frac{${mnum(fmt(D.Pextract,0))}\\ \\mathrm{kW}}
+    {${RHO}\\ \\mathrm{kg/m^{3}}\\;\\cdot\\;${CP}\\ \\mathrm{J/(kg\\cdot K)}\\;\\cdot\\;${mnum(fmt(D.Qpump,3))}\\ \\mathrm{m^{3}/s}}
+    =${mnum(fmt(D.dT,2))}\\ \\mathrm{K}$$</div>
+    <table class="rt">
+    <tr><td>Rohrquerschnitt A = π·(d/2)²</td><td>${fmt(D.area,3)} m²</td></tr>
+    <tr><td>Durchfluss Pumpe Q = A·v<sub>Ansaug</sub></td><td>${fmt(D.Qpump,3)} m³/s = ${fmt(D.Qpump*1000,0)} l/s</td></tr>
+    <tr><td>Auslasstemperatur T<sub>aus</sub> = T<sub>ein,lokal</sub> − ΔT</td><td>${fmt(tOutlet,2)} °C</td></tr>
+    <tr><td>Wärmetauscher-Übertragungswirkungsgrad (Annahme)</td><td>1,0</td></tr></table></div>
+
+    <div class="sec"><h2 id="s4">4. Hydraulik &amp; dimensionslose Kennzahlen</h2>
+    <table class="rt">
+    <tr><td>Durchfluss Fluss Q<sub>Fluss</sub> = (2/3)·B·h<sub>max</sub>·v (Parabelprofil)</td><td>${fmt(Qriver,1)} m³/s</td></tr>
+    <tr><td>Reynolds-Zahl Re = v·h/ν</td><td>${D.Re.toExponential(2)} (turbulent)</td></tr>
+    <tr><td>Péclet-Zahl Pe = v·h/α</td><td>${D.Pe.toExponential(2)}</td></tr>
+    <tr><td>eff. Temperaturleitfähigkeit α (turbulent, empirisch)</td><td>${D.alpha.toExponential(2)} m²/s</td></tr>
+    <tr><td>Abkühlung stromab (vollständig durchmischt) = P<sub>entzug</sub>/(ρ·c<sub>p</sub>·Q<sub>Fluss</sub>)</td><td>${fmt(dTmix,3)} K</td></tr></table></div>
+
+    <div class="sec"><h2 id="s5">5. Numerisches Modell &amp; räumliche Diskretisierung</h2>
+    <p>Gelöst wird eine stationär iterierte Advektions-Diffusions-Gleichung für die Wassertemperatur
+    auf einem strukturierten Finite-Volumen-Gitter mit terrainfolgenden (Sigma-)Koordinaten in der
+    Vertikalen. Die Flusssohle ist parabelförmig (tiefste Stelle in der Flussmitte, Resttiefe
+    ${MINDEPTH} m an den Ufern); die Wasseroberfläche liegt fest bei z = ${WSURF} m.</p>
+    <table class="rt">
+    <tr><th>Größe</th><th>Wert</th></tr>
+    <tr><td>Gebietsgröße L × B × h<sub>max</sub></td><td>${L} m × ${W} m × ${fmt(P.depth,1)} m</td></tr>
+    <tr><td>Zellenzahl NX × NY × NZ</td><td>${NX} × ${NY} × ${NZ} = ${(NX*NY*NZ).toLocaleString('de-DE')} Zellen</td></tr>
+    <tr><td>Zellweite Δx (längs)</td><td>${fmt(dx,2)} m</td></tr>
+    <tr><td>Zellweite Δy (quer)</td><td>${fmt(dy,2)} m</td></tr>
+    <tr><td>Vertikal: Sigma-Schichten</td><td>${NZ} Schichten, lokale Dicke = h(y)/${NZ} (terrainfolgend)</td></tr>
+    <tr><td>Zeitschritt (semi-Lagrange, CFL-frei)</td><td>Δt = 1,2·Δx / max(v, 0,1) = ${fmt(1.2*dx/Math.max(P.vFlow,0.1),1)} s</td></tr>
+    <tr><td>Diffusion (stabile konvexe Mittelung)</td><td>w<sub>x</sub> = 0,05 · w<sub>y</sub> = 0,30 · w<sub>z</sub> = 0,26 (anisotrop, quer dominiert)</td></tr>
+    <tr><td>Geschwindigkeitsprofil</td><td>quer: parabolisch (1 − 0,5·ŷ²) · vertikal: 1/7-Potenzgesetz</td></tr>
+    <tr><td>Einleitung (Auslass)</td><td>verdünnte Quellzelle, Kernanteil strömungsabhängig (Verdünnungsmodell)</td></tr></table>
+    <img class="rimg" src="${vGrid}">
+    <div class="cap">Abb. 5.1 – Numerisches Gitter: Oberflächenraster (NX×NY) sowie Sigma-Vernetzung im Quer- und Längsschnitt.</div></div>
+
+    <div class="sec"><h2 id="s6">6. 3D-Ansichten der Berechnung</h2>
+    <img class="rimg" src="${vOblique}">
+    <div class="cap">Abb. 6.1 – Schrägansicht: Gesamtmodell mit Wärmepumpe, Rohrleitungen, Bebauung und Temperaturfeld.</div>
+    <img class="rimg rimg2" src="${vTop}"><img class="rimg rimg2" style="margin-left:2%" src="${vSide}">
+    <div class="cap">Abb. 6.2 / 6.3 – Draufsicht und Seitenansicht.</div>
+    <img class="rimg" src="${vOutlet}">
+    <div class="cap">Abb. 6.4 – Detail am Auslass: Einleitstrahl and Kaltwasserfahne.</div></div>
+
+    <div class="sec"><h2 id="s7">7. Interaktive 3D-Ansicht</h2>
+    <div id="ttview"><img id="ttimg" src="${ttSrc()}" draggable="false">
+      <div class="tthint">🖱 Ziehen = drehen · Mausrad = Zoomstufe</div></div>
+    <div class="cap">Abb. 7.1 – Drehbare Modellansicht (${TT.perRing} Blickwinkel × ${TT.rings} Zoomstufen).
+    Hinweis: interaktiv im Report-Reiter; im PDF erscheint der aktuell gewählte Blickwinkel als Standbild.</div></div>
+
+    <div class="sec"><h2 id="s8">8. Ergebnisdiagramme</h2>
+    <div class="svg-container">${svgChart(REPCHART.tx)}</div><div class="cap">Abb. 8.1 – T(x): Temperatur entlang Mittellinie und Pumpenufer (Vektorgrafik).</div>
+    <div class="svg-container">${svgChart(REPCHART.ty)}</div><div class="cap">Abb. 8.2 – T(y): Temperatur über die Flussbreite am Querschnitt x = ${fmt(P.xCut,0)} m.</div>
+    <div class="svg-container">${svgChart(REPCHART.vz)}</div><div class="cap">Abb. 8.3 – v(z): Geschwindigkeitsprofil über die Tiefe (Flussmitte, 1/7-Potenzgesetz).</div>
+    <div class="svg-container">${svgChart(REPCHART.tz)}</div><div class="cap">Abb. 8.4 – T(z): vertikales Temperaturprofil am Pumpenufer.</div>
+    <p class="cap">Die zugrunde liegenden Daten können in der Anwendung je Diagramm als CSV exportiert werden.</p></div>
+
+    <div class="sec"><h2 id="s9">9. Kennzahlen (vollständig)</h2>
+    <table class="rt">${kpiHTML}</table>
+    ${warnHTML?`<div class="note"><b>Warnhinweise:</b> ${warnHTML}</div>`:''}</div>
+
+    <div class="sec"><h2 id="s10">10. Hinweise &amp; Modellgrenzen</h2>
+    <p>Das Modell ist ein vereinfachtes Ingenieurmodell zur Veranschaulichung und Voreinschätzung:
+    stationäre Strömung mit vorgegebenem Profil (keine Impulsgleichung), turbulente Vermischung über
+    effektive, anisotrope Austauschkoeffizienten, Einleitung über ein Verdünnungsmodell in der Quellzelle,
+    kein Wärmeaustausch mit Atmosphäre und Sohle, konstante Stoffwerte (ρ = ${RHO} kg/m³,
+    c<sub>p</sub> = ${CP} J/(kg·K)). Für Genehmigungsplanungen sind gekoppelte 3D-CFD-Rechnungen und
+    Naturmessungen erforderlich. Ergebnisse gelten für die oben dokumentierten Eingangsparameter.</p></div>
+
+    <div class="sec"><h2 id="s11">11. Mathematische Modellbeschreibung</h2>
+    <h3>11.1 Transportgleichung</h3>
+    <p>Für die Wassertemperatur T(x, y, z) wird die Advektions-Diffusions-Gleichung gelöst
+    (stationär iteriert, Quellterm q an der Einleitstelle):</p>
+    <div class="frm">$$\\frac{\\partial T}{\\partial t}
+    +u\\,\\frac{\\partial T}{\\partial x}+v\\,\\frac{\\partial T}{\\partial y}+w\\,\\frac{\\partial T}{\\partial z}
+    =\\frac{\\partial}{\\partial x}\\!\\left(\\alpha_x\\frac{\\partial T}{\\partial x}\\right)
+    +\\frac{\\partial}{\\partial y}\\!\\left(\\alpha_y\\frac{\\partial T}{\\partial y}\\right)
+    +\\frac{\\partial}{\\partial z}\\!\\left(\\alpha_z\\frac{\\partial T}{\\partial z}\\right)+q$$</div>
+    <p>Die Advektion wird semi-Lagrange'sch diskretisiert (Rückwärtsverfolgung entlang der Charakteristik
+    mit linearer Interpolation, unbedingt stabil) mit dem Zeitschritt</p>
+    <div class="frm">$$\\Delta t=\\frac{1{,}2\\;\\Delta x}{\\max\\left(v_m,\\;0{,}1\\ \\mathrm{m/s}\\right)}
+    =${mnum(fmt(1.2*dx/Math.max(P.vFlow,0.1),1))}\\ \\mathrm{s}$$</div>
+    <p>Die Diffusion ist als stabile, konvexe Nachbar-Mittelung je Raumrichtung implementiert
+    (Gewichte w<sub>x</sub> = 0,05, w<sub>y</sub> = 0,30, w<sub>z</sub> = 0,26 – die Quer- und
+    Vertikalvermischung dominiert, wodurch sich die Kaltwasserfahne stromab verbreitert und auflöst).</p>
+    <h3>11.2 Geometrie und Sigma-Koordinaten</h3>
+    <p>Die Sohle ist parabelförmig mit fester Wasseroberfläche bei z = ${WSURF} m:</p>
+    <div class="frm">$$h(y)=\\max\\!\\Big(h_{\\max}\\,\\big(1-\\hat y^{\\,2}\\big),\\;${mnum(fmt(MINDEPTH,1))}\\ \\mathrm{m}\\Big),
+    \\qquad \\hat y=\\frac{2y}{B}-1$$
+    $$z_{\\mathrm{Sohle}}(y)=${WSURF}\\ \\mathrm{m}-h(y)$$</div>
+    <p>Vertikal werden ${NZ} terrainfolgende Sigma-Schichten verwendet; jede Zelle hat die lokale Dicke h(y)/${NZ}:</p>
+    <div class="frm">$$z(\\sigma)=z_{\\mathrm{Sohle}}(y)+\\sigma\\,h(y),\\qquad \\sigma\\in[0,\\,1]$$</div>
+    <h3>11.3 Geschwindigkeitsfeld</h3>
+    <div class="frm">$$u(x,y,z)=1{,}15\\;v_m\\;\\big(1-0{,}5\\,\\hat y^{\\,2}\\big)\\;\\sigma^{1/7}$$</div>
+    <p>Querprofil parabolisch (Maximum in Flussmitte), Vertikalprofil nach dem 1/7-Potenzgesetz
+    turbulenter Gerinneströmungen; der Vorfaktor 1,15 normiert auf die mittlere Geschwindigkeit
+    v<sub>m</sub>. An Ein- und Auslass wird eine lokale Senken- bzw. Quellströmung überlagert
+    (~ Q<sub>Pumpe</sub>/r², begrenzt), die Ansaugung und Einleitung abbildet.</p>
+    <h3>11.4 Wärmepumpe (COP-Kopplung)</h3>
+    <div class="frm">$$P_{\\mathrm{el}}=\\frac{P_{\\mathrm{heiz}}}{\\mathrm{COP}},\\qquad
+    P_{\\mathrm{entzug}}=P_{\\mathrm{heiz}}\\left(1-\\frac{1}{\\mathrm{COP}}\\right)$$
+    $$\\text{Absenkung } \\Delta T=\\frac{P_{\\mathrm{entzug}}}{\\rho\\,c_p\\,Q_{\\mathrm{Pumpe}}},\\qquad
+    Q_{\\mathrm{Pumpe}}=\\pi\\left(\\frac{d}{2}\\right)^{\\!2} v_{\\mathrm{Ansaug}}$$
+    $$T_{\\mathrm{aus}}=\\max\\big(T_{\\mathrm{ein,lokal}}-\\Delta T,\\;0\\,{}^{\\circ}\\mathrm{C}\\big)$$</div>
+    <h3>11.5 Einleitung mit Verdünnungsmodell</h3>
+    <p>Das Rückgabewasser wird in einer Quellzell-Umgebung mit strömungsabhängigem Kernanteil eingemischt:</p>
+    <div class="frm">$$D=\\frac{Q_{\\mathrm{Pumpe}}}{Q_{\\mathrm{Pumpe}}+v_m\\,A_{\\mathrm{Zone}}\\cdot 0{,}55},\\qquad
+    w_{\\mathrm{Kern}}=\\min\\big(0{,}95;\\;1{,}7\\,D\\big)$$
+    $$T_{\\mathrm{Zelle}}\\;\\leftarrow\\;T_{\\mathrm{Zelle}}\\,(1-w)+T_{\\mathrm{aus}}\\,w,\\qquad
+    w=w_{\\mathrm{Kern}}\\;e^{-\\left(0{,}12\\,\\Delta i^{2}+0{,}5\\,\\Delta j^{2}\\right)}$$</div>
+    <p>Bei hoher Flussgeschwindigkeit sinkt der Kernanteil (starke Anfangsverdünnung, kurze warme Fahne);
+    bei geringer Geschwindigkeit bleibt die Fahne kälter und länger.</p>
+    <h3>11.6 Turbulente Austauschgrößen und Kennzahlen</h3>
+    <div class="frm">$$\\alpha_{\\mathrm{eff}}=\\alpha_{\\mathrm{mol}}+0{,}012\\;v_m\\,h_{\\max},\\qquad
+    Re=\\frac{v_m\\,h_{\\max}}{\\nu},\\qquad Pe=\\frac{v_m\\,h_{\\max}}{\\alpha_{\\mathrm{eff}}}$$</div>
+    <p>mit ν = 1,3·10<sup>−6</sup> m²/s (Wasser, ~10 °C) und α<sub>mol</sub> = 1,4·10<sup>−7</sup> m²/s.</p>
+    <h3>11.7 Randbedingungen und Durchmischung</h3>
+    <p>Einström-Rand (x = 0): T = T<sub>Fluss</sub> (Dirichlet). Ausström-Rand (x = L): Nullgradient.
+    Ufer, Sohle und Wasseroberfläche: adiabat (kein Wärmestrom, kein Austausch mit der Atmosphäre).
+    Vollständig durchmischte Abkühlung des Gesamtflusses:</p>
+    <div class="frm">$$\\Delta T_{\\mathrm{mix}}=\\frac{P_{\\mathrm{entzug}}}{\\rho\\,c_p\\,Q_{\\mathrm{Fluss}}},\\qquad
+    Q_{\\mathrm{Fluss}}=\\tfrac{2}{3}\\,B\\,h_{\\max}\\,v_m
+    \\;\\;\\text{(Integral des Parabelprofils)}$$</div></div>
+  `;
+  // LaTeX-Formeln rendern (KaTeX); Fallback: Rohtext bleibt sichtbar, falls CDN fehlt
+  try{
+    if(typeof renderMathInElement==='function')
+      renderMathInElement(document.getElementById('reportBody'),
+        {delimiters:[{left:'$$',right:'$$',display:true}],throwOnError:false});
+  }catch(e){}
+  // Inhaltsverzeichnis: sanft im Report-Container scrollen
+  document.querySelectorAll('#reportBody .toc a').forEach(a=>{
+    a.addEventListener('click',ev=>{ev.preventDefault();
+      const t=document.getElementById(a.dataset.t);
+      if(t)t.scrollIntoView({behavior:'smooth',block:'start'});});
+  });
+  // Drehansicht: Ziehen = Winkel, Mausrad = Zoomstufe
+  const ttimg=document.getElementById('ttimg');
+  let dragX=null;
+  ttimg.addEventListener('pointerdown',e=>{dragX=e.clientX;ttimg.setPointerCapture(e.pointerId);ttimg.style.cursor='grabbing';});
+  ttimg.addEventListener('pointermove',e=>{
+    if(dragX===null)return;
+    const stepPx=14, moved=Math.trunc((e.clientX-dragX)/stepPx);
+    if(moved!==0){TT.idx=((TT.idx-moved)%TT.perRing+TT.perRing)%TT.perRing;dragX+=moved*stepPx;ttimg.src=ttSrc();}
+  });
+  ttimg.addEventListener('pointerup',()=>{dragX=null;ttimg.style.cursor='grab';});
+  ttimg.addEventListener('wheel',e=>{e.preventDefault();
+    TT.ring=(e.deltaY<0)?Math.min(TT.rings-1,TT.ring+1):Math.max(0,TT.ring-1);
+    ttimg.src=ttSrc();},{passive:false});
+  showTab('report');
+}
+document.getElementById('btnReport').addEventListener('click',generateReport);
+document.getElementById('btnRegen').addEventListener('click',generateReport);
+document.getElementById('reportBody').addEventListener('click',e=>{
+  if(e.target.classList.contains('rGen')) generateReport();
+});
+document.getElementById('btnPdf').addEventListener('click',()=>{
+  /* window.print() wird in eingebetteten Vorschauen (Sandbox-iframe) stumm blockiert.
+     Daher: im Top-Level-Fenster direkt drucken; eingebettet stattdessen den Bericht als
+     eigenständige HTML-Datei herunterladen, die sich beim Öffnen selbst zum Druck anbietet. */
+  let embedded=false;
+  try{ embedded=(window.self!==window.top); }catch(e){ embedded=true; }
+  if(!embedded){ window.print(); return; }
+  const body=document.getElementById('reportBody').innerHTML;
+  // relevante Report-Stile aus dem Stylesheet extrahieren
+  let css='';
+  for(const sheet of document.styleSheets){
+    try{ for(const r of sheet.cssRules){
+      if(r.cssText && r.cssText.indexOf('#reportBody')>=0) css+=r.cssText.replace(/#reportBody/g,'.rb')+'\n';
+    }}catch(e){}
+  }
+  const doc=`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">
+<title>Flusswasserwärmepumpe – Simulationsbericht</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<style>
+body{margin:0;background:#eef1f4;font-family:Segoe UI,Arial,sans-serif}
+.bar{position:sticky;top:0;background:#16202b;color:#dfe9f2;padding:9px 16px;font-size:13px;display:flex;gap:12px;align-items:center}
+.bar button{font-size:13px;padding:6px 16px;border-radius:6px;cursor:pointer;background:#1b2734;color:#dfe9f2;border:1px solid #3fc1c9}
+.rb{max-width:900px;margin:18px auto;background:#fff;color:#1c2733;padding:42px 52px;border-radius:4px;
+box-shadow:0 3px 16px rgba(0,0,0,.25);font-size:13.5px;line-height:1.55}
+${css}
+#ttview .tthint{display:none}
+@media print{.bar{display:none}body{background:#fff}.rb{box-shadow:none;max-width:none;margin:0;padding:10mm 12mm}
+.rb h2{page-break-after:avoid}.rb .sec{page-break-inside:avoid}}
+</style></head><body>
+<div class="bar"><button onclick="window.print()">⬇ Als PDF drucken/speichern</button>
+<span>Diese Datei ist der vollständige Bericht – über den Button als PDF speichern.</span></div>
+<div class="rb">${body}</div>
+<script>document.querySelectorAll('.toc a').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();
+const t=document.getElementById(a.dataset.t||a.getAttribute('href').slice(1));if(t)t.scrollIntoView({behavior:'smooth'});}));<\/script>
+</body></html>`;
+  const blob=new Blob([doc],{type:'text/html;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob); a.download='Simulationsbericht_Flusswaermepumpe.html';
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href); a.remove();},0);
+});
 
 /* =========================================================================
    (7) INITIALISIERUNG & ANIMATIONSSCHLEIFE
@@ -1384,6 +1812,8 @@ function animate(){
   updateBoat(0.4);
   updateGauges();
   // Rohrmündungen nach Temperatur einfärben (Auslass sichtbar kälter)
+  if(capIn){ const c=colNorm(tInletLocal); capIn.material.color.setRGB(c.r,c.g,c.b); }
+  if(capOut){ const c=colNorm(tOutlet);    capOut.material.color.setRGB(c.r,c.g,c.b); }
   if(frame%6===0){ drawColorbar(); updateKPI(); updateCharts();
     const cv=renderer.domElement, hud=document.getElementById('hud');
     if(hud) hud.textContent=`Canvas ${cv.clientWidth}×${cv.clientHeight}px · Buffer ${cv.width}×${cv.height} · `+
