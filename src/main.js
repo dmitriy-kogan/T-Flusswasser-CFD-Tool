@@ -1812,8 +1812,6 @@ function animate(){
   updateBoat(0.4);
   updateGauges();
   // Rohrmündungen nach Temperatur einfärben (Auslass sichtbar kälter)
-  if(capIn){ const c=colNorm(tInletLocal); capIn.material.color.setRGB(c.r,c.g,c.b); }
-  if(capOut){ const c=colNorm(tOutlet);    capOut.material.color.setRGB(c.r,c.g,c.b); }
   if(frame%6===0){ drawColorbar(); updateKPI(); updateCharts();
     const cv=renderer.domElement, hud=document.getElementById('hud');
     if(hud) hud.textContent=`Canvas ${cv.clientWidth}×${cv.clientHeight}px · Buffer ${cv.width}×${cv.height} · `+
