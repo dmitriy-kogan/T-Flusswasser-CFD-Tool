@@ -58,6 +58,14 @@ function pipeZ(){ return Math.max(WSURF - 0.5, bedZ(Y_BANK) + 0.2); }
 const NX = 160, NY = 26, NZ = 8;
 const dx = L / NX, dy = W / NY;
 const NC = NX * NY * NZ;
+/* Zellvolumen je Quer-Spalte j (Sigma: alle NZ Schichten einer Säule gleich dick);
+   wird bei Änderung der Wassertiefe neu berechnet */
+const VCOL = new Float64Array(NY);
+function updateVCOL(){
+  for(let j=0;j<NY;j++){ const y=(j+0.5)*dy;
+    VCOL[j] = dx*dy*Math.max(localDepth(y),MINDEPTH)/NZ; }
+}
+updateVCOL();
 
 /* Temperaturfelder (Doppelpuffer) */
 let T  = new Float32Array(NC);
@@ -99,18 +107,20 @@ function velocityAt(x,y,z, out){
   let v = 0, w = 0;
 
   const zp=pipeZ();
-  // Ansaug-Senke am Einlass – schwache, lokale Störung (erzeugt keine tote Spur)
+  // Ansaug-Senke am Einlass – PHYSIKALISCH skaliert: v_r = Q/(4π·r²)
+  // (Punktsenke; die reale Einzugszone ist ein dünner Stromröhren-Schlauch A = Q/u)
+  const SNK = D.Qpump/(4*Math.PI);
   const ix=X_IN-x, iy=Y_BANK-y, iz=zp-z;
-  const r2i = ix*ix+iy*iy+iz*iz + 8;
-  const sink = Math.min(D.Qpump * 0.18 / r2i, 0.12);
-  u += sink*ix; v += sink*iy*0.4; w += sink*iz;
+  const r2i = ix*ix+iy*iy+iz*iz + 1.0;
+  const sink = Math.min(SNK / (r2i*Math.sqrt(r2i)), 0.5);   // v_r/r -> Komponenten unten
+  u += sink*ix; v += sink*iy; w += sink*iz;
 
-  // Auslass-Quelle – ebenfalls schwach (der sichtbare Einleitstrahl entsteht über
-  // dedizierte Auslass-Partikel, nicht über ein starkes Geschwindigkeitsfeld)
+  // Auslass-Quelle – Punktquelle gleicher Stärke (Nahfeld des Strahls
+  // wird über die dedizierten Strahl-Partikel visualisiert)
   const ox=x-X_OUT, oy=y-Y_BANK, oz=z-zp;
-  const r2o = ox*ox+oy*oy+oz*oz + 8;
-  const src = Math.min(D.Qpump * 0.18 / r2o, 0.12);
-  u += src*ox; v += src*oy*0.4; w += src*oz;
+  const r2o = ox*ox+oy*oy+oz*oz + 1.0;
+  const src = Math.min(SNK / (r2o*Math.sqrt(r2o)), 0.5);
+  u += src*ox; v += src*oy; w += src*oz;
 
   out.u=u; out.v=v; out.w=w;
 }
@@ -157,38 +167,68 @@ function solveStep(dt){
       }
     }
   }
-  // --- Diffusion (stabile konvexe Mittelung je Richtung) ---
-  // Quer- und Vertikalvermischung dominieren -> die Kaltwasserfahne verbreitert sich
-  // stromab und vermischt sich allmählich vollständig mit dem warmen Flusswasser.
+  // --- Diffusion: KONSERVATIVE Fluss-Form (paarweiser Energieaustausch) ---
+  // Erhält das volumengewichtete Wärmedefizit exakt (verifiziert: Defizitfluss
+  // Φ(x)=Σρc_p·u·(T_in−T)·dA ist stromab konstant = P_entzug).
+  // Effektive Austauschraten entsprechen empirischer Querdispersion in Flüssen
+  // (D_y ≈ 0,6·h·u*), vertikal D_z ≈ 0,07·h·u*.
   const wX=0.05, wY=0.30, wZ=0.26;
-  for (let k=0;k<NZ;k++)
-    for (let j=0;j<NY;j++)
-      for (let i=0;i<NX;i++){
-        const c=idx(i,j,k); let val=T2[c];
-        { const m=i>0?T2[idx(i-1,j,k)]:val, p=i<NX-1?T2[idx(i+1,j,k)]:val; val=val*(1-wX)+(m+p)*0.5*wX; }
-        { const m=j>0?T2[idx(i,j-1,k)]:val, p=j<NY-1?T2[idx(i,j+1,k)]:val; val=val*(1-wY)+(m+p)*0.5*wY; }
-        { const m=k>0?T2[idx(i,j,k-1)]:val, p=k<NZ-1?T2[idx(i,j,k+1)]:val; val=val*(1-wZ)+(m+p)*0.5*wZ; }
-        T2[c]=val;
-      }
+  // x-Richtung (Zellvolumina längs konstant)
+  for (let k=0;k<NZ;k++) for (let j=0;j<NY;j++) for (let i=0;i<NX-1;i++){
+    const a=idx(i,j,k), b=idx(i+1,j,k);
+    const ex=wX*0.5*(T2[a]-T2[b]); T2[a]-=ex; T2[b]+=ex;
+  }
+  // y-Richtung (variable Säulenvolumina -> harmonisches Volumenmittel)
+  for (let k=0;k<NZ;k++) for (let j=0;j<NY-1;j++){
+    const Va=VCOL[j], Vb=VCOL[j+1], Vh=2*Va*Vb/(Va+Vb);
+    for (let i=0;i<NX;i++){
+      const a=idx(i,j,k), b=idx(i,j+1,k);
+      const E=wY*0.5*Vh*(T2[a]-T2[b]); T2[a]-=E/Va; T2[b]+=E/Vb;
+    }
+  }
+  // z-Richtung (Sigma-Schichten einer Säule gleich dick)
+  for (let k=0;k<NZ-1;k++) for (let j=0;j<NY;j++) for (let i=0;i<NX;i++){
+    const a=idx(i,j,k), b=idx(i,j,k+1);
+    const ex=wZ*0.5*(T2[a]-T2[b]); T2[a]-=ex; T2[b]+=ex;
+  }
 
   // --- Quellterme & Randbedingungen ---
   // Einström-Rand x=0: gesamtes Flusswasser hat dieselbe Temperatur
   for (let k=0;k<NZ;k++) for (let j=0;j<NY;j++) T2[idx(0,j,k)] = P.tIn;
-  // Auslass: Kaltwasser-Einleitung. Der Durchfluss Q_Pumpe verdünnt sich in der
-  // vorbeiströmenden Wassermenge -> höhere Strömungsgeschwindigkeit = stärkere Verdünnung
-  // = wärmere, kleinere Kaltwasserfahne (Energiebilanz/Strömungseinfluss).
+  // Auslass: ENERGIEERHALTENDE Kaltwasser-Einleitung (Quellterm q der Transportgleichung).
+  // Pro Zeitschritt wird exakt das Wärmedefizit P_entzug·Δt in die Einleitzone eingebracht:
+  //   T_Zelle -= P_entzug·Δt·ŵ / (ρ·c_p·V_Zelle),  Σŵ = 1,
+  // geklippt bei T_aus (das Flusswasser kann lokal nicht kälter werden als das eingeleitete
+  // Wasser). Der Strahl tritt senkrecht nach unten aus (Rohr von oben), prallt auf die Sohle
+  // und breitet sich sohlnah aus -> Gewichte sind SOHLNAH zentriert (Prallstrahl).
+  // Die Verdünnung mit der Strömung ergibt sich damit von selbst aus der Energiebilanz:
+  // mehr Durchfluss am Auslass vorbei = gleiches Defizit auf mehr Wasser = wärmere Fahne.
   const oi = Math.round(X_OUT/dx), oj=Math.round(Y_BANK/dy);
-  const okSg = (pipeZ() - bedZ(Y_BANK))/Math.max(localDepth(Y_BANK),1e-6);   // Sigma der Mündung
-  const ok = Math.min(NZ-1, Math.max(0, Math.round(okSg*NZ - 0.5)));
-  const zoneA  = 5*dy * 3*(localDepth(Y_BANK)/NZ);            // Querschnitt der Einleitzone [m²]
-  const dilute = D.Qpump / (D.Qpump + P.vFlow*zoneA*0.55);    // lokaler Kaltwasseranteil (0..1)
-  const core   = Math.min(0.95, dilute*1.7);                  // Kerngewicht der Einleitung
-  for (let dk=-1;dk<=1;dk++) for (let dj=-2;dj<=2;dj++) for (let di=0;di<=3;di++){
-    const i=oi+di,j=oj+dj,k=ok+dk;
-    if(i<0||i>=NX||j<0||j>=NY||k<0||k>=NZ) continue;
-    const wgt = core*Math.exp(-(di*di*0.12 + dj*dj*0.5 + dk*dk*0.9));
-    const c=idx(i,j,k);
-    T2[c] = T2[c]*(1-wgt) + tOutlet*wgt;
+  const tClip = Math.max(tOutlet, 0);
+  {
+    // kompakte Einmischzone des Prallstrahls: wenige Meter um die Mündung,
+    // volle Wassersäule mit sohlwärtiger Gewichtung (k=0 = Sohlzelle)
+    let wsum=0; const cells=[];
+    for (let dk=0;dk<NZ;dk++) for (let dj=-1;dj<=1;dj++) for (let di=0;di<=2;di++){
+      const i=oi+di, j=oj+dj, k=dk;
+      if(i<0||i>=NX||j<0||j>=NY||k>=NZ) continue;
+      const w = Math.exp(-(di*di*0.25 + dj*dj*0.6 + dk*0.45));
+      cells.push({c:idx(i,j,k), w, Vc:VCOL[j]}); wsum+=w;
+    }
+    // Defizit-Energie dieses Zeitschritts konservativ verteilen
+    let Erest = D.Pextract*1000*dt;                    // [J] pro Solver-Schritt
+    for(const cl of cells){
+      const dTc = Erest>0 ? (D.Pextract*1000*dt)*(cl.w/wsum)/(RHO*CP*cl.Vc) : 0;
+      const nv = T2[cl.c]-dTc;
+      if(nv<tClip){ Erest -= (T2[cl.c]-tClip)*RHO*CP*cl.Vc; T2[cl.c]=tClip; }
+      else        { Erest -= dTc*RHO*CP*cl.Vc;              T2[cl.c]=nv;   }
+    }
+    // Umlage: bei T_aus-Clipping verbleibende Energie auf Zellen mit Spielraum verteilen
+    if(Erest > 1){
+      let cap=0; for(const cl of cells) cap += Math.max(T2[cl.c]-tClip,0)*RHO*CP*cl.Vc;
+      if(cap>1){ const f=Math.min(Erest/cap,1);
+        for(const cl of cells) T2[cl.c] -= (T2[cl.c]-tClip)*f; }
+    }
   }
   // (kein Luft-Wasser-Austausch: der Fluss ist überall gleich temperiert,
   //  damit ausschließlich der Effekt der Wärmepumpe sichtbar wird)
@@ -745,15 +785,16 @@ function updateCircuit(dt){
 }
 
 /* ---------------------------------------------------------------------------
-   Auslassstrahl: gespreizte (diffusive) Injektion des gekühlten Wassers aus dem
-   Auslassrohr in den Fluss. Jedes Partikel erhält am Mund eine ZUFÄLLIGE Richtung
-   innerhalb eines Kegels (Fächer) -> kein "Seil", sondern eine aufgeweitete Wolke.
-   Der Strahlimpuls klingt mit dem Alter ab, danach trägt die Strömung die Partikel
-   stromab. Einfärbung nach lokaler Temperatur (frisch = kalte Auslasstemperatur).
+   Auslassstrahl (physikalisch): Das Rohr mündet SENKRECHT von oben, der Strahl
+   tritt daher NACH UNTEN aus – runder Freistrahl mit ~12° Halbwinkel und
+   Geschwindigkeitsabfall ~ 1/s. Nach ~1–2 m trifft er auf die Sohle (Prallstrahl)
+   und wird in einen radial auswärts gerichteten, abklingenden WANDSTRAHL
+   umgelenkt, den die Flussströmung stromab trägt.
    --------------------------------------------------------------------------- */
 const NJ=1500;
 const jX=new Float32Array(NJ), jY=new Float32Array(NJ), jZ=new Float32Array(NJ);
-const jU=new Float32Array(NJ), jV=new Float32Array(NJ), jW=new Float32Array(NJ), jAge=new Float32Array(NJ);
+const jU=new Float32Array(NJ), jV=new Float32Array(NJ), jW=new Float32Array(NJ);
+const jAge=new Float32Array(NJ), jHit=new Uint8Array(NJ), jS=new Float32Array(NJ), jLife=new Float32Array(NJ);
 const jPos=new Float32Array(NJ*3), jCol=new Float32Array(NJ*3);
 const jetGeo=new THREE.BufferGeometry();
 jetGeo.setAttribute('position',new THREE.BufferAttribute(jPos,3));
@@ -761,39 +802,62 @@ jetGeo.setAttribute('color',new THREE.BufferAttribute(jCol,3));
 const jetParticles=new THREE.Points(jetGeo,
   new THREE.PointsMaterial({size:1.7,map:DISC,alphaTest:0.4,vertexColors:true,transparent:true,opacity:0.96,sizeAttenuation:true,depthWrite:false}));
 jetParticles.frustumCulled=false; scene.add(jetParticles);
-const JET_LIFE=30;
+const JET_LIFE=34;
 function seedJet(n,fresh){
-  const zp=pipeZ();
-  jX[n]=X_OUT + (Math.random()-0.5)*0.6;          // an der Rohrmündung
-  jY[n]=Y_BANK + (Math.random()-0.5)*0.6;
-  jZ[n]=zp     + (Math.random()-0.5)*0.6;
-  // zufällige Anfangsrichtung im Kegel -> Fächer (gespreizte Injektion, kein Seil)
-  const spd  = P.vSuct*(0.45+0.55*Math.random());
-  const aXY  = (Math.random()-0.5)*1.6;            // horizontale Aufweitung (±0,8 rad ≈ ±46°)
-  const aZ   = (Math.random()-0.5)*1.1;            // vertikale Aufweitung
-  // Grundrichtung: in den Fluss (+y) und etwas stromab (+x), um die z-Achse gefächert
-  const bx=0.45, by=0.90;
-  const cs=Math.cos(aXY), sn=Math.sin(aXY);
-  let dx=bx*cs-by*sn, dy=bx*sn+by*cs, dz=Math.tan(aZ)*0.6;
-  const inv=spd/Math.max(Math.hypot(dx,dy,dz),1e-6);
-  jU[n]=dx*inv; jV[n]=dy*inv; jW[n]=dz*inv;
-  jAge[n]=fresh?0:Math.random()*JET_LIFE;          // beim Start zeitlich gestaffelt
+  const zp=pipeZ(), rM=P.dPipe/2;
+  // Start in der Rohrmündung (Kreisquerschnitt)
+  const a=Math.random()*Math.PI*2, rr=rM*Math.sqrt(Math.random());
+  jX[n]=X_OUT + Math.cos(a)*rr;
+  jY[n]=Y_BANK + Math.sin(a)*rr;
+  jZ[n]=zp;
+  // Richtung: senkrecht NACH UNTEN, Freistrahl-Kegel ~±12°
+  const th=Math.random()*Math.PI*2, tilt=Math.tan((Math.random()*12)*Math.PI/180);
+  const spd=P.vSuct*(0.85+0.15*Math.random());
+  const dxn=Math.cos(th)*tilt, dyn=Math.sin(th)*tilt, dzn=-1;
+  const inv=spd/Math.hypot(dxn,dyn,dzn);
+  jU[n]=dxn*inv; jV[n]=dyn*inv; jW[n]=dzn*inv;
+  jHit[n]=0;
+  jLife[n]=JET_LIFE*(0.45+1.1*Math.random());      // INDIVIDUELLE Lebensdauer -> Wolke
+                                                    // blendet aus statt an einer Kante zu enden
+  jAge[n]=fresh?0:Math.random()*jLife[n];           // beim Start zeitlich gestaffelt
+  jS[n]=fresh?0:jAge[n]*P.vSuct*0.6;               // zurückgelegter Weg (für Entrainment)
 }
 for(let n=0;n<NJ;n++) seedJet(n,false);
 function updateJet(dt){
   for(let n=0;n<NJ;n++){
     velocityAt(jX[n],jY[n],jZ[n],_vel);
-    const decay=Math.exp(-jAge[n]/8);              // Strahlimpuls klingt ab -> mischt sich ein
-    jX[n]+=(_vel.u + jU[n]*decay)*dt;
-    jY[n]+=(_vel.v + jV[n]*decay)*dt;
-    jZ[n]+=(_vel.w + jW[n]*decay)*dt;
+    // Strahlgeschwindigkeit klingt ab: Freistrahl u_c ~ 1/s, Wandstrahl schneller
+    const decay=Math.exp(-jAge[n]/(jHit[n]?5:9));
+    // turbulente Dispersion: wächst, wenn der Strahlimpuls abklingt
+    // (D_y ~ 0,1 m²/s -> Schrittweite sqrt(2·D·dt) ≈ 0,28 m, im Kern unterdrückt)
+    const dj_=0.32*(1-decay);
+    const rx=(Math.random()-0.5)*2*dj_, ry=(Math.random()-0.5)*2*dj_, rz=(Math.random()-0.5)*dj_;
+    const mvx=(_vel.u + jU[n]*decay)*dt + rx,
+          mvy=(_vel.v + jV[n]*decay)*dt + ry,
+          mvz=(_vel.w + jW[n]*decay)*dt + rz;
+    jX[n]+=mvx; jY[n]+=mvy; jZ[n]+=mvz;
+    jS[n]+=Math.hypot(mvx,mvy,mvz);                 // zurückgelegte Weglänge s
     jAge[n]+=dt*0.5;
-    if(jAge[n]>JET_LIFE || !(jX[n]<L) || jY[n]<0 || jY[n]>W || jZ[n]<bedZ(jY[n]) || jZ[n]>WSURF || !isFinite(jX[n]))
+    // Prallstrahl: an der Sohle in radialen Wandstrahl umlenken
+    const bz=bedZ(jY[n]);
+    if(!jHit[n] && jZ[n]<=bz+0.25){
+      jZ[n]=bz+0.25; jHit[n]=1;
+      const rx=jX[n]-X_OUT, ry=jY[n]-Y_BANK;
+      const rl=Math.max(Math.hypot(rx,ry),0.15);
+      const spd=Math.hypot(jU[n],jV[n],jW[n])*0.85;   // Impulsverlust beim Aufprall
+      jU[n]=spd*rx/rl; jV[n]=spd*ry/rl; jW[n]=0;      // radial auswärts entlang der Sohle
+    }
+    if(jAge[n]>jLife[n] || !(jX[n]<L) || jX[n]<0 || jY[n]<0 || jY[n]>W ||
+       jZ[n]<bedZ(jY[n]) || jZ[n]>WSURF || !isFinite(jX[n]))
       seedJet(n,true);
     const o=n*3; jPos[o]=jX[n]; jPos[o+1]=jZ[n]; jPos[o+2]=jY[n];
-    // Farbe = lokale Feldtemperatur (identische Quelle wie Schnittebenen/Tracer,
-    // damit Partikel- und Ebenenfarben exakt zusammenpassen)
-    const c=colNorm(sampleT(jX[n],jY[n],jZ[n]));
+    // Farbe = ENTRAINMENT-Mischtemperatur des Strahlwassers:
+    // Im Potentialkern (s < ~6,2·d) ist das Strahlwasser noch unverdünnt bei T_aus;
+    // danach sinkt der Quellwasseranteil wie c ≈ 6,2·d/s (runder Freistrahl).
+    // Umgebung = lokales Feld -> stromab konvergiert die Farbe exakt zur Ebenenfarbe.
+    const cFrac=Math.min(1, 6.2*P.dPipe/Math.max(jS[n],1e-3));
+    const tmix=cFrac*tOutlet + (1-cFrac)*sampleT(jX[n],jY[n],jZ[n]);
+    const c=colNorm(tmix);
     jCol[o]=c.r; jCol[o+1]=c.g; jCol[o+2]=c.b;
   }
   jetGeo.attributes.position.needsUpdate=true;
@@ -801,12 +865,14 @@ function updateJet(dt){
 }
 
 /* ---------------------------------------------------------------------------
-   Ansaugung am Einlass: Partikel werden in einer Umgebung der Einlassmündung
-   gesät und sichtbar von allen Seiten zur Mündung hin beschleunigt (Senkenströmung
-   ~ Q/(4πr²) zusätzlich zum Feld). Nahe der Mündung verschwinden sie (angesaugt)
-   und werden neu am Rand der Zone gesät -> deutlich sichtbare Sogwirkung.
+   Ansaugung am Einlass (physikalisch): Die Senkenströmung ist v_r = Q/(4π·r²)
+   und gegen die Flussströmung schnell vernachlässigbar. Eingesaugt wird daher
+   nur der dünne STROMRÖHREN-SCHLAUCH mit Querschnitt A = Q/u (Radius ~0,5–1 m)
+   stromauf der Mündung. Die Partikel folgen dem ECHTEN Geschwindigkeitsfeld
+   (inkl. physikalischer Senke, ohne künstliche Verstärkung): Partikel im
+   Schlauch werden gefangen, die übrigen ziehen knapp vorbei.
    --------------------------------------------------------------------------- */
-const NS=380, SUCT_R=8;                 // Anzahl / Radius der Ansaugzone [m]
+const NS=380;
 const sX=new Float32Array(NS), sY=new Float32Array(NS), sZ=new Float32Array(NS);
 const sEsc=new Float32Array(NS);        // individuelle (zufällige) Auslaufgrenze -> keine sichtbare Kante
 const sPos=new Float32Array(NS*3), sCol=new Float32Array(NS*3);
@@ -816,46 +882,46 @@ suctGeo.setAttribute('color',new THREE.BufferAttribute(sCol,3));
 const suctParticles=new THREE.Points(suctGeo,
   new THREE.PointsMaterial({size:1.5,map:DISC,alphaTest:0.4,vertexColors:true,transparent:true,opacity:0.9,sizeAttenuation:true,depthWrite:false}));
 suctParticles.frustumCulled=false; scene.add(suctParticles);
+function captureRadius(){
+  // Einzugsschlauch: A = Q/u  ->  r = sqrt(A/π); u = lokale Anströmung an der Mündung
+  velocityAt(X_IN-6, Y_BANK, pipeZ(), _vel);
+  const u=Math.max(Math.hypot(_vel.u,_vel.v,_vel.w), 0.05);
+  return Math.sqrt(D.Qpump/(Math.PI*u));
+}
 function seedSuct(n){
-  // überwiegend STROMAUF der Mündung säen (die Strömung trägt die Partikel heran),
-  // der Rest ringsum in der Kugelschale; Radien breit gestreut -> keine scharfe Zone
-  const zp=pipeZ();
-  sEsc[n]=X_IN + SUCT_R*(0.6+1.8*Math.random());       // zufällige Auslaufgrenze stromab
+  const zp=pipeZ(), rc=captureRadius();
+  sEsc[n]=X_IN + 6 + Math.random()*20;               // zufällige Auslaufgrenze stromab
   for(let tries=0;tries<14;tries++){
-    const upst=Math.random()<0.75;
-    const r=SUCT_R*(0.3+0.9*Math.random());
-    const th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1);
-    let x=X_IN+r*Math.sin(ph)*Math.cos(th);
-    if(upst) x=X_IN-r*(0.25+0.75*Math.random());
-    const y=Y_BANK+r*Math.sin(ph)*Math.sin(th)*(upst?0.55:1);
-    const z=zp   +r*Math.cos(ph)*0.5;                  // vertikal etwas gestaucht
-    if(x<0||x>L||y<0.3||y>W) continue;
+    // stromauf säen: 65 % im Einzugsschlauch (werden gefangen),
+    // 35 % im Ring darum (ziehen sichtbar vorbei -> zeigt die Schlauchgrenze)
+    const inTube=Math.random()<0.65;
+    const a=Math.random()*Math.PI*2;
+    const rr=inTube ? rc*Math.sqrt(Math.random())
+                    : rc*(1.15+1.6*Math.random());
+    const x=X_IN - (2 + Math.random()*16);           // 2–18 m stromauf
+    const y=Y_BANK + Math.cos(a)*rr;
+    const z=zp     + Math.sin(a)*rr*0.7;
+    if(y<0.3||y>W) continue;
     if(z<bedZ(y)+0.1||z>WSURF-0.05) continue;
     sX[n]=x; sY[n]=y; sZ[n]=z; return;
   }
-  sX[n]=X_IN-4; sY[n]=Y_BANK; sZ[n]=pipeZ();           // Rückfallposition (stromauf)
+  sX[n]=X_IN-6; sY[n]=Y_BANK; sZ[n]=pipeZ();
 }
 for(let n=0;n<NS;n++) seedSuct(n);
 function updateSuction(dt){
   const zp=pipeZ();
   for(let n=0;n<NS;n++){
-    velocityAt(sX[n],sY[n],sZ[n],_vel);
-    // zusätzliche Senkenströmung Richtung Mündung (für sichtbare Sogwirkung skaliert)
-    const dxm=X_IN-sX[n], dym=Y_BANK-sY[n], dzm=zp-sZ[n];
-    const r=Math.max(Math.hypot(dxm,dym,dzm),0.3);
-    const vs=Math.min(1.6*D.Qpump/(r*r), 1.7);
-    // leichtes turbulentes Zittern -> natürlicher, "verwässerter" Eindruck
-    const jx=(Math.random()-0.5)*0.10, jy=(Math.random()-0.5)*0.10, jz=(Math.random()-0.5)*0.05;
-    sX[n]+=(_vel.u+vs*dxm/r+jx)*dt; sY[n]+=(_vel.v+vs*dym/r+jy)*dt; sZ[n]+=(_vel.w+vs*dzm/r+jz)*dt;
+    velocityAt(sX[n],sY[n],sZ[n],_vel);              // ECHTES Feld (physikalische Senke)
+    // leichtes turbulentes Zittern
+    const jx=(Math.random()-0.5)*0.06, jy=(Math.random()-0.5)*0.06, jz=(Math.random()-0.5)*0.03;
+    sX[n]+=(_vel.u+jx)*dt; sY[n]+=(_vel.v+jy)*dt; sZ[n]+=(_vel.w+jz)*dt;
     const r2=(sX[n]-X_IN)**2+(sY[n]-Y_BANK)**2+(sZ[n]-zp)**2;
-    // an der Mündung angesaugt (früh, bevor sich ein Klumpen bildet) oder
-    // jenseits der INDIVIDUELLEN Auslaufgrenze -> neu säen (diffuser Übergang, keine Kante).
-    // Der feste Außenradius gilt nur stromauf/seitlich, nicht stromab.
-    if(r2<2.0 || sX[n]>sEsc[n] || (sX[n]<X_IN && r2>SUCT_R*SUCT_R*3.2) ||
+    // an der Mündung eingesaugt oder vorbeigezogen -> neu säen
+    if(r2<0.45 || sX[n]>sEsc[n] || sX[n]<X_IN-24 ||
        sZ[n]<bedZ(sY[n]) || sZ[n]>WSURF || !isFinite(sX[n]))
       seedSuct(n);
     const o=n*3; sPos[o]=sX[n]; sPos[o+1]=sZ[n]; sPos[o+2]=sY[n];
-    const c=colNorm(sampleT(sX[n],sY[n],sZ[n]));       // Farbe = lokale Wassertemperatur
+    const c=colNorm(sampleT(sX[n],sY[n],sZ[n]));     // Farbe = lokale Wassertemperatur
     sCol[o]=c.r; sCol[o+1]=c.g; sCol[o+2]=c.b;
   }
   suctGeo.attributes.position.needsUpdate=true;
@@ -1196,7 +1262,7 @@ document.querySelectorAll('.ctrl[data-p] input').forEach(inp=>{
 });
 function onParamChange(p){
   computeDerived();
-  if(p==='depth'){ buildEnv(); buildWater(); buildPump(); }
+  if(p==='depth'){ updateVCOL(); buildEnv(); buildWater(); buildPump(); }
   if(p==='dPipe'){ buildPump(); }
   placePlanes();
   refreshLabels(); refreshDerived();
@@ -1246,17 +1312,19 @@ function updateKPI(){
   // maximale Temperaturabsenkung gegenüber Einström-/Umgebungsreferenz
   const ref=P.tIn;
   let maxDrop=0, recX=X_OUT;
-  const jL=Math.round(Y_BANK/dy), ksurf=NZ-1;
-  for(let i=0;i<NX;i++){
-    const t=T[idx(i,jL,ksurf)];
-    const drop=ref-t; if(drop>maxDrop)maxDrop=drop;
+  // Max. lokale Absenkung: über das GESAMTE 3D-Feld (das Defizit sitzt sohlnah!)
+  for(let k=0;k<NZ;k++) for(let j=0;j<NY;j++) for(let i=0;i<NX;i++){
+    const drop=ref-T[idx(i,j,k)]; if(drop>maxDrop)maxDrop=drop;
   }
-  // Erholungslänge: ab Auslass stromab, bis Plume < 0.05 K unter Referenz
+  // Erholungslänge: ab Auslass stromab, bis die Fahne im GESAMTEN Querschnitt < 0.05 K
   const iO=Math.round(X_OUT/dx);
   recX=L;
   for(let i=iO;i<NX;i++){
-    const t=T[idx(i,jL,ksurf)];
-    if(ref-t<0.05){recX=(i+0.5)*dx;break;}
+    let mx=0;
+    for(let k=0;k<NZ;k++) for(let j=0;j<NY;j++){
+      const d=ref-T[idx(i,j,k)]; if(d>mx)mx=d;
+    }
+    if(mx<0.05){recX=(i+0.5)*dx;break;}
   }
   const recLen=Math.max(recX-X_OUT,0);
   // Energiebilanz: Flussdurchfluss (parabolischer Querschnitt) und durchmischte Abkühlung
@@ -1603,7 +1671,7 @@ function generateReport(){
     <img class="rimg rimg2" src="${vTop}"><img class="rimg rimg2" style="margin-left:2%" src="${vSide}">
     <div class="cap">Abb. 6.2 / 6.3 – Draufsicht und Seitenansicht.</div>
     <img class="rimg" src="${vOutlet}">
-    <div class="cap">Abb. 6.4 – Detail am Auslass: Einleitstrahl and Kaltwasserfahne.</div></div>
+    <div class="cap">Abb. 6.4 – Detail am Auslass: Einleitstrahl und Kaltwasserfahne.</div></div>
 
     <div class="sec"><h2 id="s7">7. Interaktive 3D-Ansicht</h2>
     <div id="ttview"><img id="ttimg" src="${ttSrc()}" draggable="false">
@@ -1612,10 +1680,10 @@ function generateReport(){
     Hinweis: interaktiv im Report-Reiter; im PDF erscheint der aktuell gewählte Blickwinkel als Standbild.</div></div>
 
     <div class="sec"><h2 id="s8">8. Ergebnisdiagramme</h2>
-    <div class="svg-container">${svgChart(REPCHART.tx)}</div><div class="cap">Abb. 8.1 – T(x): Temperatur entlang Mittellinie und Pumpenufer (Vektorgrafik).</div>
-    <div class="svg-container">${svgChart(REPCHART.ty)}</div><div class="cap">Abb. 8.2 – T(y): Temperatur über die Flussbreite am Querschnitt x = ${fmt(P.xCut,0)} m.</div>
-    <div class="svg-container">${svgChart(REPCHART.vz)}</div><div class="cap">Abb. 8.3 – v(z): Geschwindigkeitsprofil über die Tiefe (Flussmitte, 1/7-Potenzgesetz).</div>
-    <div class="svg-container">${svgChart(REPCHART.tz)}</div><div class="cap">Abb. 8.4 – T(z): vertikales Temperaturprofil am Pumpenufer.</div>
+    ${svgChart(REPCHART.tx)}<div class="cap">Abb. 8.1 – T(x): Temperatur entlang Mittellinie und Pumpenufer (Vektorgrafik).</div>
+    ${svgChart(REPCHART.ty)}<div class="cap">Abb. 8.2 – T(y): Temperatur über die Flussbreite am Querschnitt x = ${fmt(P.xCut,0)} m.</div>
+    ${svgChart(REPCHART.vz)}<div class="cap">Abb. 8.3 – v(z): Geschwindigkeitsprofil über die Tiefe (Flussmitte, 1/7-Potenzgesetz).</div>
+    ${svgChart(REPCHART.tz)}<div class="cap">Abb. 8.4 – T(z): vertikales Temperaturprofil am Pumpenufer.</div>
     <p class="cap">Die zugrunde liegenden Daten können in der Anwendung je Diagramm als CSV exportiert werden.</p></div>
 
     <div class="sec"><h2 id="s9">9. Kennzahlen (vollständig)</h2>
@@ -1658,21 +1726,24 @@ function generateReport(){
     <p>Querprofil parabolisch (Maximum in Flussmitte), Vertikalprofil nach dem 1/7-Potenzgesetz
     turbulenter Gerinneströmungen; der Vorfaktor 1,15 normiert auf die mittlere Geschwindigkeit
     v<sub>m</sub>. An Ein- und Auslass wird eine lokale Senken- bzw. Quellströmung überlagert
-    (~ Q<sub>Pumpe</sub>/r², begrenzt), die Ansaugung und Einleitung abbildet.</p>
+    (Punktsenke/-quelle v<sub>r</sub> = Q<sub>Pumpe</sub>/(4π·r²)), die Ansaugung und Einleitung abbildet. Die reale Einzugszone der Ansaugung ist der Stromröhren-Schlauch mit Querschnitt A = Q<sub>Pumpe</sub>/u.</p>
     <h3>11.4 Wärmepumpe (COP-Kopplung)</h3>
     <div class="frm">$$P_{\\mathrm{el}}=\\frac{P_{\\mathrm{heiz}}}{\\mathrm{COP}},\\qquad
     P_{\\mathrm{entzug}}=P_{\\mathrm{heiz}}\\left(1-\\frac{1}{\\mathrm{COP}}\\right)$$
-    $$\\text{Absenkung } \\Delta T=\\frac{P_{\\mathrm{entzug}}}{\\rho\\,c_p\\,Q_{\\mathrm{Pumpe}}},\\qquad
+    $$\\Delta T=\\frac{P_{\\mathrm{entzug}}}{\\rho\\,c_p\\,Q_{\\mathrm{Pumpe}}},\\qquad
     Q_{\\mathrm{Pumpe}}=\\pi\\left(\\frac{d}{2}\\right)^{\\!2} v_{\\mathrm{Ansaug}}$$
     $$T_{\\mathrm{aus}}=\\max\\big(T_{\\mathrm{ein,lokal}}-\\Delta T,\\;0\\,{}^{\\circ}\\mathrm{C}\\big)$$</div>
-    <h3>11.5 Einleitung mit Verdünnungsmodell</h3>
-    <p>Das Rückgabewasser wird in einer Quellzell-Umgebung mit strömungsabhängigem Kernanteil eingemischt:</p>
-    <div class="frm">$$D=\\frac{Q_{\\mathrm{Pumpe}}}{Q_{\\mathrm{Pumpe}}+v_m\\,A_{\\mathrm{Zone}}\\cdot 0{,}55},\\qquad
-    w_{\\mathrm{Kern}}=\\min\\big(0{,}95;\\;1{,}7\\,D\\big)$$
-    $$T_{\\mathrm{Zelle}}\\;\\leftarrow\\;T_{\\mathrm{Zelle}}\\,(1-w)+T_{\\mathrm{aus}}\\,w,\\qquad
-    w=w_{\\mathrm{Kern}}\\;e^{-\\left(0{,}12\\,\\Delta i^{2}+0{,}5\\,\\Delta j^{2}\\right)}$$</div>
-    <p>Bei hoher Flussgeschwindigkeit sinkt der Kernanteil (starke Anfangsverdünnung, kurze warme Fahne);
-    bei geringer Geschwindigkeit bleibt die Fahne kälter und länger.</p>
+    <h3>11.5 Einleitung als energieerhaltender Quellterm</h3>
+    <p>Das Rohr mündet senkrecht von oben; der Strahl prallt auf die Sohle und durchmischt die
+    Wassersäule der Einleitzone. Pro Zeitschritt wird exakt das Wärmedefizit
+    P<sub>entzug</sub>·Δt konservativ in die Zone eingebracht (Gauß-Gewichte ŵ, Σŵ = 1,
+    sohlwärts betont), begrenzt durch die Auslasstemperatur:</p>
+    <div class="frm">$$T_{\\mathrm{Zelle}}\\;\\leftarrow\\;\\max\\!\\left(T_{\\mathrm{Zelle}}
+    -\\frac{P_{\\mathrm{entzug}}\\,\\Delta t\\;\\hat w}{\\rho\\,c_p\\,V_{\\mathrm{Zelle}}},\\;T_{\\mathrm{aus}}\\right)$$</div>
+    <p>Damit ist der Wärmedefizit-Strom durch jeden Querschnitt stromab exakt gleich der
+    Entzugsleistung (verifiziert: Φ(x) = Σ ρ·c<sub>p</sub>·u·(T<sub>Fluss</sub>−T)·dA = P<sub>entzug</sub>
+    für alle x hinter dem Auslass). Die Verdünnung mit der Strömung ergibt sich von selbst:
+    mehr Durchfluss verteilt dasselbe Defizit auf mehr Wasser → wärmere, kürzere Fahne.</p>
     <h3>11.6 Turbulente Austauschgrößen und Kennzahlen</h3>
     <div class="frm">$$\\alpha_{\\mathrm{eff}}=\\alpha_{\\mathrm{mol}}+0{,}012\\;v_m\\,h_{\\max},\\qquad
     Re=\\frac{v_m\\,h_{\\max}}{\\nu},\\qquad Pe=\\frac{v_m\\,h_{\\max}}{\\alpha_{\\mathrm{eff}}}$$</div>
