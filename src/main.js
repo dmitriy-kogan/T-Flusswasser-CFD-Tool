@@ -55,13 +55,19 @@ const ZSURF = () => WSURF;                                  // Wasseroberfläche
 function pipeZ(){ return Math.max(WSURF - 0.5, bedZ(Y_BANK) + 0.2); }
 
 /* Rechengitter (gröber für Echtzeit) */
-const NX = 160, NY = 26, NZ = 8;
-const dx = L / NX, dy = W / NY;
-const NC = NX * NY * NZ;
+/* Basisauflösung; über den Regler "Gitterauflösung" skalierbar (4 Stufen).
+   dt ~ dx hält die Advektion stabil; die Mischung wird über PHYSIKALISCHE
+   Diffusivitäten definiert (siehe solveStep) und ist damit gitterunabhängig. */
+const NX0 = 160, NY0 = 26, NZ0 = 8;
+const GRID_S = [0.75, 1, 1.5, 2];                       // Skalierungsfaktoren je Stufe
+let NX = NX0, NY = NY0, NZ = NZ0;
+let dx = L / NX, dy = W / NY;
+let NC = NX * NY * NZ;
 /* Zellvolumen je Quer-Spalte j (Sigma: alle NZ Schichten einer Säule gleich dick);
-   wird bei Änderung der Wassertiefe neu berechnet */
-const VCOL = new Float64Array(NY);
+   wird bei Änderung von Wassertiefe oder Gitter neu berechnet */
+let VCOL = new Float64Array(NY);
 function updateVCOL(){
+  if(VCOL.length!==NY) VCOL=new Float64Array(NY);
   for(let j=0;j<NY;j++){ const y=(j+0.5)*dy;
     VCOL[j] = dx*dy*Math.max(localDepth(y),MINDEPTH)/NZ; }
 }
@@ -151,6 +157,7 @@ function cellZ(j,k){ const y=(j+0.5)*dy; return bedZ(y) + (k+0.5)/NZ*localDepth(
 let tInletLocal = P.tIn, tOutlet = P.tIn;  // lokale Entnahme- / Auslasstemperatur
 
 /* ein Solver-Schritt: semi-Lagrange-Advektion + Diffusion + Quellen/RB */
+let _wzj=new Float64Array(0);   // Puffer für vertikale Diffusionsgewichte je Spalte
 function solveStep(dt){
   // lokale Entnahmetemperatur (= Flusstemperatur am Einlass) und Auslasstemperatur
   tInletLocal = sampleT(X_IN, Y_BANK, pipeZ());
@@ -168,11 +175,19 @@ function solveStep(dt){
     }
   }
   // --- Diffusion: KONSERVATIVE Fluss-Form (paarweiser Energieaustausch) ---
-  // Erhält das volumengewichtete Wärmedefizit exakt (verifiziert: Defizitfluss
-  // Φ(x)=Σρc_p·u·(T_in−T)·dA ist stromab konstant = P_entzug).
-  // Effektive Austauschraten entsprechen empirischer Querdispersion in Flüssen
-  // (D_y ≈ 0,6·h·u*), vertikal D_z ≈ 0,07·h·u*.
-  const wX=0.05, wY=0.30, wZ=0.26;
+  // Gewichte aus PHYSIKALISCHEN Diffusivitäten (gitterunabhängig!):
+  //   u* ≈ 0,1·v_m (Schubspannungsgeschw.), D_y = 0,6·h·u*, D_z = 0,067·h·u*,
+  //   D_x klein (Längsvermischung dominiert die Advektion).
+  //   w = 2·D·Δt/Δ² (Stabilitätskappe 0,45); vertikal je Spalte (Δz = h(y)/NZ).
+  const uStar = 0.1*Math.max(P.vFlow,0.05);
+  const Dy = 0.6*P.depth*uStar, Dz = 0.067*P.depth*uStar, Dx = 0.3*Dy;
+  const wX = Math.min(2*Dx*dt/(dx*dx), 0.45);
+  const wY = Math.min(2*Dy*dt/(dy*dy), 0.45);
+  const WZJ = _wzj.length===NY ? _wzj : (_wzj=new Float64Array(NY));
+  for(let j=0;j<NY;j++){
+    const dz=Math.max(localDepth((j+0.5)*dy),MINDEPTH)/NZ;
+    WZJ[j]=Math.min(2*Dz*dt/(dz*dz), 0.45);
+  }
   // x-Richtung (Zellvolumina längs konstant)
   for (let k=0;k<NZ;k++) for (let j=0;j<NY;j++) for (let i=0;i<NX-1;i++){
     const a=idx(i,j,k), b=idx(i+1,j,k);
@@ -186,10 +201,12 @@ function solveStep(dt){
       const E=wY*0.5*Vh*(T2[a]-T2[b]); T2[a]-=E/Va; T2[b]+=E/Vb;
     }
   }
-  // z-Richtung (Sigma-Schichten einer Säule gleich dick)
-  for (let k=0;k<NZ-1;k++) for (let j=0;j<NY;j++) for (let i=0;i<NX;i++){
-    const a=idx(i,j,k), b=idx(i,j,k+1);
-    const ex=wZ*0.5*(T2[a]-T2[b]); T2[a]-=ex; T2[b]+=ex;
+  // z-Richtung (Sigma-Schichten einer Säule gleich dick; Gewicht je Spalte)
+  for (let j=0;j<NY;j++){ const wZ=WZJ[j];
+    for (let k=0;k<NZ-1;k++) for (let i=0;i<NX;i++){
+      const a=idx(i,j,k), b=idx(i,j,k+1);
+      const ex=wZ*0.5*(T2[a]-T2[b]); T2[a]-=ex; T2[b]+=ex;
+    }
   }
 
   // --- Quellterme & Randbedingungen ---
@@ -206,13 +223,16 @@ function solveStep(dt){
   const oi = Math.round(X_OUT/dx), oj=Math.round(Y_BANK/dy);
   const tClip = Math.max(tOutlet, 0);
   {
-    // kompakte Einmischzone des Prallstrahls: wenige Meter um die Mündung,
-    // volle Wassersäule mit sohlwärtiger Gewichtung (k=0 = Sohlzelle)
+    // kompakte Einmischzone des Prallstrahls: IN METERN definiert (≈5 m stromab,
+    // ±2 m quer, volle Wassersäule sohlwärts gewichtet) -> gitterunabhängig
+    const diN=Math.max(2,Math.round(5/dx)), djN=Math.max(1,Math.round(2/dy));
     let wsum=0; const cells=[];
-    for (let dk=0;dk<NZ;dk++) for (let dj=-1;dj<=1;dj++) for (let di=0;di<=2;di++){
+    for (let dk=0;dk<NZ;dk++) for (let dj=-djN;dj<=djN;dj++) for (let di=0;di<=diN;di++){
       const i=oi+di, j=oj+dj, k=dk;
       if(i<0||i>=NX||j<0||j>=NY||k>=NZ) continue;
-      const w = Math.exp(-(di*di*0.25 + dj*dj*0.6 + dk*0.45));
+      const w = Math.exp(-( Math.pow(di*dx/2.0,2)*0.25
+                          + Math.pow(dj*dy/1.0,2)*0.15
+                          + (dk/NZ)*8*0.45 ));
       cells.push({c:idx(i,j,k), w, Vc:VCOL[j]}); wsum+=w;
     }
     // Defizit-Energie dieses Zeitschritts konservativ verteilen
@@ -1260,6 +1280,31 @@ document.querySelectorAll('.ctrl[data-p] input').forEach(inp=>{
     onParamChange(p);
   });
 });
+/* ---------- Gitterauflösung umschalten (Regler "Numerik") ------------------ */
+const GRID_NAMES=['Grob (0,75×)','Standard (1×)','Fein (1,5×)','Sehr fein (2×)'];
+function updateGridInfo(lv){
+  document.getElementById('gridVal').textContent=GRID_NAMES[lv-1];
+  document.getElementById('gridInfo').innerHTML=
+    `Zellen: <b>${NX} × ${NY} × ${NZ}</b> = <b>${NC.toLocaleString('de-DE')}</b> · `+
+    `Δx = <b>${fmt(dx,2)}</b> m · Δy = <b>${fmt(dy,2)}</b> m · Δz = h(y)/${NZ}<br>`+
+    `Mischung über physikalische Diffusivitäten (D<sub>y</sub> = 0,6·h·u*, `+
+    `D<sub>z</sub> = 0,067·h·u*) – Ergebnisse damit gitterunabhängig.`;
+}
+function setGridLevel(lv){
+  const s=GRID_S[lv-1];
+  NX=Math.round(NX0*s); NY=Math.round(NY0*s); NZ=Math.round(NZ0*Math.min(s,2));
+  dx=L/NX; dy=W/NY; NC=NX*NY*NZ;
+  T=new Float32Array(NC).fill(P.tIn);
+  T2=new Float32Array(NC);
+  updateVCOL();
+  relax(60);                              // neues Feld einschwingen
+  fieldStats(); buildVectors(); buildFlow();
+  if(isoGroup && document.getElementById('t_iso').checked) buildIso();
+  if(gridGroup.visible || gridGroup.children.length>0) buildGrid();
+  updateGridInfo(lv);
+}
+document.getElementById('gridRes').addEventListener('input',e=>setGridLevel(+e.target.value));
+
 function onParamChange(p){
   computeDerived();
   if(p==='depth'){ updateVCOL(); buildEnv(); buildWater(); buildPump(); }
@@ -1415,20 +1460,39 @@ function lineChart(canvas, series, xlabel, ylabel, xRange, yRange){
 const chTx=document.getElementById('chTx'), chTy=document.getElementById('chTy'),
       chVz=document.getElementById('chVz'), chTz=document.getElementById('chTz');
 function updateCharts(){
-  const jMid=Math.round(NY/2), jBank=Math.round(Y_BANK/dy), ksurf=NZ-1;
+  const jMid=Math.round(NY/2), jBank=Math.round(Y_BANK/dy);
   const iC=Math.min(Math.max(Math.round(P.xCut/dx),0),NX-1);
-  // T(x): Mittellinie & Pumpenufer
-  const mid=[],bank=[];
+  // Drei Vertikal-Auswertungen je Säule: Oberfläche (k=NZ-1), Tiefenmittel, Sohle (k=0).
+  // Grund: Das Kaltwasser liegt nach dem Prallstrahl sohlnah – die drei Kurven zeigen
+  // die vertikale Schichtung der Fahne direkt im 2D-Diagramm.
+  const colAvg=(i,j)=>{let s=0; for(let k=0;k<NZ;k++) s+=T[idx(i,j,k)]; return s/NZ;};
+  const CS={surf:'#7fd0ff', mean:'#ffb454', bed:'#ff5c5c'};
+  // T(x) am Pumpenufer: Oberfläche / Tiefenmittel / Sohle
+  const bxS = [];
+  const bxM = [];
+  const bxB = [];
   for(let i=0;i<NX;i++){const x=(i+0.5)*dx;
-    mid.push([x,T[idx(i,jMid,ksurf)]]); bank.push([x,T[idx(i,jBank,ksurf)]]);}
+    bxS.push([x,T[idx(i,jBank,NZ-1)]]);
+    bxM.push([x,colAvg(i,jBank)]);
+    bxB.push([x,T[idx(i,jBank,0)]]);}
   let lo=Tmin-0.1, hi=Tmax+0.1;
   const TLO=0, THI=30;                 // feste Temperaturskala der Diagramme [°C]
-  lineChart(chTx,[{name:'Mittellinie',color:'#3fc1c9',data:mid},
-                  {name:'Pumpenufer',color:'#ffb454',data:bank}],
+  lineChart(chTx,[{name:'Oberfläche',color:CS.surf,data:bxS},
+                  {name:'Tiefenmittel',color:CS.mean,data:bxM},
+                  {name:'Sohle',color:CS.bed,data:bxB}],
             'x [m]','T',[0,L],[TLO,THI]);
-  // T(y) am Querschnitt
-  const ty=[]; for(let j=0;j<NY;j++){const y=(j+0.5)*dy; ty.push([y,T[idx(iC,j,ksurf)]]);}
-  lineChart(chTy,[{name:'T(y)',color:'#54d98c',data:ty}],'y [m]','T',[0,W],[TLO,THI]);
+  // T(y) am Querschnitt: Oberfläche / Tiefenmittel / Sohle
+  const tyS = [];
+  const tyM = [];
+  const tyB = [];
+  for(let j=0;j<NY;j++){const y=(j+0.5)*dy;
+    tyS.push([y,T[idx(iC,j,NZ-1)]]);
+    tyM.push([y,colAvg(iC,j)]);
+    tyB.push([y,T[idx(iC,j,0)]]);}
+  lineChart(chTy,[{name:'Oberfläche',color:CS.surf,data:tyS},
+                  {name:'Tiefenmittel',color:CS.mean,data:tyM},
+                  {name:'Sohle',color:CS.bed,data:tyB}],
+            'y [m]','T',[0,W],[TLO,THI]);
   // v(z) über die Tiefe an x=xCut, Flussmitte (tiefste Stelle); Höhe z absolut (Oberfläche fest bei WSURF)
   const vz=[]; let vmax=0.1; const dlC=localDepth(W/2), bC=bedZ(W/2);
   for(let k=0;k<NZ;k++){ const z=bC+(k+0.5)/NZ*dlC; velocityAt(P.xCut,W/2,z,_vel);
@@ -1439,15 +1503,21 @@ function updateCharts(){
   for(let k=0;k<NZ;k++){ const z=bB+(k+0.5)/NZ*dlB; tz.push([z,T[idx(iC,jBank,k)]]); }
   lineChart(chTz,[{name:'T(z)',color:'#ff8fab',data:tz}],'Höhe z [m]','T',[bB,WSURF],[TLO,THI]);
   // aktuelle Daten für den CSV-Export registrieren
-  EXPORTS.chTx={file:'T_x_Mittellinie_Pumpenufer', head:['x [m]','T Mittellinie [°C]','T Pumpenufer [°C]'],
-                rows:mid.map((p,i)=>[p[0],p[1],bank[i][1]])};
-  EXPORTS.chTy={file:'T_y_Querschnitt_x'+Math.round(P.xCut), head:['y [m]','T [°C]'], rows:ty};
+  EXPORTS.chTx={file:'T_x_Pumpenufer', head:['x [m]','T Oberfläche [°C]','T Tiefenmittel [°C]','T Sohle [°C]'],
+                rows:bxM.map((p,i)=>[p[0],bxS[i][1],p[1],bxB[i][1]])};
+  EXPORTS.chTy={file:'T_y_Querschnitt_x'+Math.round(P.xCut), head:['y [m]','T Oberfläche [°C]','T Tiefenmittel [°C]','T Sohle [°C]'],
+                rows:tyM.map((p,j)=>[p[0],tyS[j][1],p[1],tyB[j][1]])};
   EXPORTS.chVz={file:'v_z_Profil_x'+Math.round(P.xCut), head:['Höhe z [m]','v [m/s]'], rows:vz};
   EXPORTS.chTz={file:'T_z_Profil_x'+Math.round(P.xCut), head:['Höhe z [m]','T [°C]'], rows:tz};
   // Spezifikationen für die SVG-Diagramme des Reports (Vektorgrafik)
-  REPCHART.tx={series:[{name:'Mittellinie',color:'#1b8a94',data:mid},{name:'Pumpenufer',color:'#c77b1e',data:bank}],
+  REPCHART.tx={series:[{name:'Oberfläche',color:'#2b7bb9',data:bxS},
+                       {name:'Tiefenmittel',color:'#c77b1e',data:bxM},
+                       {name:'Sohle',color:'#c0392b',data:bxB}],
                xl:'x [m]',yl:'T [°C]',xr:[0,L],yr:[TLO,THI]};
-  REPCHART.ty={series:[{name:'T(y)',color:'#2b9e5f',data:ty}],xl:'y [m]',yl:'T [°C]',xr:[0,W],yr:[TLO,THI]};
+  REPCHART.ty={series:[{name:'Oberfläche',color:'#2b7bb9',data:tyS},
+                       {name:'Tiefenmittel',color:'#c77b1e',data:tyM},
+                       {name:'Sohle',color:'#c0392b',data:tyB}],
+               xl:'y [m]',yl:'T [°C]',xr:[0,W],yr:[TLO,THI]};
   REPCHART.vz={series:[{name:'v(z)',color:'#2b7bb9',data:vz}],xl:'Höhe z [m]',yl:'v [m/s]',xr:[bC,WSURF],yr:[0,vmax*1.1]};
   REPCHART.tz={series:[{name:'T(z)',color:'#c2477d',data:tz}],xl:'Höhe z [m]',yl:'T [°C]',xr:[bB,WSURF],yr:[TLO,THI]};
 }
@@ -1659,7 +1729,7 @@ function generateReport(){
     <tr><td>Zellweite Δy (quer)</td><td>${fmt(dy,2)} m</td></tr>
     <tr><td>Vertikal: Sigma-Schichten</td><td>${NZ} Schichten, lokale Dicke = h(y)/${NZ} (terrainfolgend)</td></tr>
     <tr><td>Zeitschritt (semi-Lagrange, CFL-frei)</td><td>Δt = 1,2·Δx / max(v, 0,1) = ${fmt(1.2*dx/Math.max(P.vFlow,0.1),1)} s</td></tr>
-    <tr><td>Diffusion (stabile konvexe Mittelung)</td><td>w<sub>x</sub> = 0,05 · w<sub>y</sub> = 0,30 · w<sub>z</sub> = 0,26 (anisotrop, quer dominiert)</td></tr>
+    <tr><td>Diffusion (konservative Fluss-Form)</td><td>aus physikalischen Diffusivitäten: D<sub>y</sub> = 0,6·h·u*, D<sub>z</sub> = 0,067·h·u*, D<sub>x</sub> = 0,3·D<sub>y</sub> (u* ≈ 0,1·v<sub>m</sub>) – gitterunabhängig</td></tr>
     <tr><td>Geschwindigkeitsprofil</td><td>quer: parabolisch (1 − 0,5·ŷ²) · vertikal: 1/7-Potenzgesetz</td></tr>
     <tr><td>Einleitung (Auslass)</td><td>verdünnte Quellzelle, Kernanteil strömungsabhängig (Verdünnungsmodell)</td></tr></table>
     <img class="rimg" src="${vGrid}">
@@ -1680,8 +1750,8 @@ function generateReport(){
     Hinweis: interaktiv im Report-Reiter; im PDF erscheint der aktuell gewählte Blickwinkel als Standbild.</div></div>
 
     <div class="sec"><h2 id="s8">8. Ergebnisdiagramme</h2>
-    ${svgChart(REPCHART.tx)}<div class="cap">Abb. 8.1 – T(x): Temperatur entlang Mittellinie und Pumpenufer (Vektorgrafik).</div>
-    ${svgChart(REPCHART.ty)}<div class="cap">Abb. 8.2 – T(y): Temperatur über die Flussbreite am Querschnitt x = ${fmt(P.xCut,0)} m.</div>
+    ${svgChart(REPCHART.tx)}<div class="cap">Abb. 8.1 – T(x) am Pumpenufer: Oberflächen-, tiefengemittelte und Sohltemperatur (die Schichtung der sohlnahen Kaltwasserfahne ist direkt ablesbar).</div>
+    ${svgChart(REPCHART.ty)}<div class="cap">Abb. 8.2 – T(y): Oberflächen-, tiefengemittelte und Sohltemperatur über die Flussbreite am Querschnitt x = ${fmt(P.xCut,0)} m.</div>
     ${svgChart(REPCHART.vz)}<div class="cap">Abb. 8.3 – v(z): Geschwindigkeitsprofil über die Tiefe (Flussmitte, 1/7-Potenzgesetz).</div>
     ${svgChart(REPCHART.tz)}<div class="cap">Abb. 8.4 – T(z): vertikales Temperaturprofil am Pumpenufer.</div>
     <p class="cap">Die zugrunde liegenden Daten können in der Anwendung je Diagramm als CSV exportiert werden.</p></div>
@@ -1711,9 +1781,15 @@ function generateReport(){
     mit linearer Interpolation, unbedingt stabil) mit dem Zeitschritt</p>
     <div class="frm">$$\\Delta t=\\frac{1{,}2\\;\\Delta x}{\\max\\left(v_m,\\;0{,}1\\ \\mathrm{m/s}\\right)}
     =${mnum(fmt(1.2*dx/Math.max(P.vFlow,0.1),1))}\\ \\mathrm{s}$$</div>
-    <p>Die Diffusion ist als stabile, konvexe Nachbar-Mittelung je Raumrichtung implementiert
-    (Gewichte w<sub>x</sub> = 0,05, w<sub>y</sub> = 0,30, w<sub>z</sub> = 0,26 – die Quer- und
-    Vertikalvermischung dominiert, wodurch sich die Kaltwasserfahne stromab verbreitert und auflöst).</p>
+    <p>Die Diffusion ist als konservative Fluss-Form (paarweiser Energieaustausch) implementiert.
+    Die Austauschgewichte werden je Auflösung aus PHYSIKALISCHEN Diffusivitäten berechnet und sind
+    damit gitterunabhängig (Kappe 0,45 für Stabilität):</p>
+    <div class="frm">$$w_{\\alpha}=\\min\\!\\left(\\frac{2\\,D_{\\alpha}\\,\\Delta t}{\\Delta_{\\alpha}^{2}},\\;0{,}45\\right),
+    \\qquad D_y=0{,}6\\,h\\,u_{*},\\quad D_z=0{,}067\\,h\\,u_{*},\\quad D_x=0{,}3\\,D_y,
+    \\quad u_{*}\\approx 0{,}1\\,v_m$$</div>
+    <p>Die Quer- und Vertikalvermischung dominiert, wodurch sich die Kaltwasserfahne stromab
+    verbreitert und auflöst; vertikal wird das Gewicht je Spalte aus der lokalen Schichtdicke
+    Δz = h(y)/${NZ} bestimmt (dünne Uferschichten mischen schnell).</p>
     <h3>11.2 Geometrie und Sigma-Koordinaten</h3>
     <p>Die Sohle ist parabelförmig mit fester Wasseroberfläche bei z = ${WSURF} m:</p>
     <div class="frm">$$h(y)=\\max\\!\\Big(h_{\\max}\\,\\big(1-\\hat y^{\\,2}\\big),\\;${mnum(fmt(MINDEPTH,1))}\\ \\mathrm{m}\\Big),
@@ -1855,6 +1931,7 @@ function init(){
   relax(80);              // Anfangsfeld einschwingen
   fieldStats(); buildIso(); buildFlow();
   resize(); setView('oblique'); drawColorbar();
+  updateGridInfo(+document.getElementById('gridRes').value);
   Object.entries(TG).forEach(([id,obj])=>obj.visible=document.getElementById(id).checked);
   circParticles.visible=document.getElementById('t_stream').checked;
   jetParticles.visible=document.getElementById('t_stream').checked;

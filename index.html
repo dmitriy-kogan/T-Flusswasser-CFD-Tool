@@ -1,14 +1,15 @@
 <!DOCTYPE html>
 <html lang="de">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Flusswasserwärmepumpe – Interaktives 3D-CFD-Tool</title>
-  <!-- KaTeX für die mathematischen Formeln im Report -->
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
-  <link rel="stylesheet" href="/src/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flusswasserwärmepumpe – Interaktives 3D-CFD-Tool</title>
+
+<!-- KaTeX für die mathematischen Formeln im Report -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+<link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
 <div id="app">
@@ -87,6 +88,17 @@
     </div>
 
     <div class="group">
+      <h2>Numerik</h2>
+      <div class="body">
+        <div class="ctrl">
+          <div class="row"><label>Gitterauflösung</label><span class="val" id="gridVal"></span></div>
+          <input type="range" min="1" max="4" step="1" value="2" id="gridRes">
+        </div>
+        <div class="derived" id="gridInfo"></div>
+      </div>
+    </div>
+
+    <div class="group">
       <h2>Anzeige</h2>
       <div class="body">
         <div class="toggles">
@@ -150,8 +162,8 @@
 
   <!-- ====================== DIAGRAMME ====================== -->
   <div id="charts">
-    <div class="chart"><div class="ct"><span>T(x) – Mittellinie &amp; Pumpenufer [°C]</span><button class="exp" data-c="chTx">CSV ⬇</button></div><canvas id="chTx"></canvas></div>
-    <div class="chart"><div class="ct"><span>T(y) – Querschnitt [°C]</span><button class="exp" data-c="chTy">CSV ⬇</button></div><canvas id="chTy"></canvas></div>
+    <div class="chart"><div class="ct"><span>T(x) – Pumpenufer: Oberfläche/Mittel/Sohle [°C]</span><button class="exp" data-c="chTx">CSV ⬇</button></div><canvas id="chTx"></canvas></div>
+    <div class="chart"><div class="ct"><span>T(y) – Querschnitt: Oberfläche/Mittel/Sohle [°C]</span><button class="exp" data-c="chTy">CSV ⬇</button></div><canvas id="chTy"></canvas></div>
     <div class="chart"><div class="ct"><span>v(z) – Geschwindigkeitsprofil über Tiefe [m/s]</span><button class="exp" data-c="chVz">CSV ⬇</button></div><canvas id="chVz"></canvas></div>
     <div class="chart"><div class="ct"><span>T(Tiefe) – vertikales Profil [°C]</span><button class="exp" data-c="chTz">CSV ⬇</button></div><canvas id="chTz"></canvas></div>
   </div>
