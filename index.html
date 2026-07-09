@@ -112,6 +112,11 @@
           <label class="tg"><input type="checkbox" id="t_grid">Numerisches Gitter (FVM)</label>
           <label class="tg"><input type="checkbox" id="t_water" checked>Wasservolumen</label>
         </div>
+        <div class="toggles" style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
+          <span style="font-size:11.5px;color:var(--muted);grid-column:1 / -1">Partikelfarbe:</span>
+          <label class="tg"><input type="radio" name="pcol" id="pc_temp" checked>Wassertemperatur</label>
+          <label class="tg"><input type="radio" name="pcol" id="pc_speed">Geschwindigkeit</label>
+        </div>
       </div>
     </div>
     <div class="group">
@@ -149,6 +154,13 @@
       <div class="cwrap">
         <canvas id="cbar" width="18" height="170"></canvas>
         <div class="ticks" id="cbarTicks"></div>
+      </div>
+    </div>
+    <div id="legendV">
+      <div class="title">v [m/s]</div>
+      <div class="cwrap">
+        <canvas id="vbar" width="18" height="170"></canvas>
+        <div class="ticks" id="vbarTicks"></div>
       </div>
     </div>
     <div id="kpi">

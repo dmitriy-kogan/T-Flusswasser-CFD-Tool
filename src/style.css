@@ -116,15 +116,17 @@ button:hover{background:#243648;border-color:var(--accent)}
 }
 #scene{position:absolute;inset:0}
 /* Colorbar */
-#legend{position:absolute;top:14px;right:14px;background:rgba(14,21,29,.82);
+#legend,#legendV{position:absolute;right:14px;background:rgba(14,21,29,.82);
   border:1px solid var(--line);border-radius:8px;padding:8px 9px;text-align:center}
-#legend .title{font-size:10px;color:var(--muted);margin-bottom:5px}
-#legend .cwrap{display:flex;align-items:stretch;gap:4px}
-#cbar{width:18px;height:170px;border-radius:3px;display:block;border:1px solid var(--line)}
-#legend .ticks{display:flex;flex-direction:column;justify-content:space-between;
+#legend{top:14px}
+#legendV{top:256px}
+#legend .title,#legendV .title{font-size:10px;color:var(--muted);margin-bottom:5px}
+#legend .cwrap,#legendV .cwrap{display:flex;align-items:stretch;gap:4px}
+#cbar,#vbar{width:18px;height:170px;border-radius:3px;display:block;border:1px solid var(--line)}
+#legend .ticks,#legendV .ticks{display:flex;flex-direction:column;justify-content:space-between;
   height:170px;font-size:9.5px;color:var(--muted);line-height:1;
   font-variant-numeric:tabular-nums;text-align:left;pointer-events:none}
-#legend .ticks span{transform:translateY(-0.5px)}
+#legend .ticks span,#legendV .ticks span{transform:translateY(-0.5px)}
 /* KPI overlay */
 #kpi{position:absolute;left:14px;bottom:14px;background:rgba(14,21,29,.86);
   border:1px solid var(--line);border-radius:8px;padding:9px 12px;max-width:340px}

@@ -529,7 +529,7 @@ function buildWater(){
 const pumpGroup=new THREE.Group(); scene.add(pumpGroup);
 
 // Kreislaufpfad (Polylinie) für die Partikel im Rohr
-let circuitPath=[], circuitPumpIdx=0, circuitCum=[], circuitTotal=1, pipeRadius=0.4;
+let circuitPath=[], circuitPumpIdx=0, circuitCum=[], circuitTotal=1, pipeRadius=0.4, pipeInnerR=0.3;
 function buildCircuitLengths(){
   circuitCum=[0];
   for(let i=0;i<circuitPath.length-1;i++)
@@ -617,8 +617,16 @@ function buildPump(){
   }
 
   const r=Math.max(P.dPipe/2,0.15);
-  const rVis=r*1.8;                    // sichtbarer Rohrradius: dicker, damit das Rohr Volumen hat
+  const rVis=r*1.8;                    // sichtbarer AUSSEN-Radius des Rohrs
   pipeRadius=rVis;
+  // Innenradius: konstante Wanddicke (0,12 m) -> der DURCHSTRÖMTE Querschnitt
+  // wächst sichtbar mit dem Durchmesser, die Wand bleibt gleich dick
+  pipeInnerR=Math.max(rVis-0.12, rVis*0.55);
+  // aktive Kreislauf-Partikelzahl ~ Querschnittsfläche (Referenz: d=0,8 m -> 900)
+  NCPa=Math.min(NCP, Math.max(260, Math.round(900*D.area/0.503)));
+  for(let n=0;n<NCPa;n++) cpS[n]=n/NCPa;             // gleichmäßig auf dem Pfad verteilen
+  // Punktgröße moderat mit dem Rohr skalieren
+  circParticles.material.size=Math.min(1.9, Math.max(0.4, rVis*1.15));
   const zp=pipeZ();                  // Mündungstiefe ≈ 0,5 m unter der Oberfläche
   // durchsichtige Rohre, damit man die Partikel im Inneren über die ganze Länge sieht
   const matIn =new THREE.MeshPhongMaterial({color:0x8fc0e6,shininess:50,transparent:true,opacity:0.30,depthWrite:false,side:THREE.DoubleSide});
@@ -722,6 +730,23 @@ function discTexture(){
 }
 const DISC=discTexture();
 
+/* Partikelfarb-Modus: 'temp' (Wassertemperatur, Farbskala) oder 'speed'
+   (Geschwindigkeit: kühles Weiß, schneller = heller; FESTE Skala 0–3 m/s,
+   passend zur zweiten Legende und zum maximal einstellbaren Wert) */
+let PCOLOR='temp';
+const VMAX_SCALE=3.0;                              // feste Obergrenze der v-Skala [m/s]
+function speedColor(sp,out){
+  // Blau (langsam) -> Cyan -> Weiß (schnell); identisch für Skala und Partikel
+  const t=Math.min(Math.max(sp/VMAX_SCALE,0),1);
+  if(t<0.5){ const f=t/0.5;
+    out.r=0.10+(0.30-0.10)*f; out.g=0.25+(0.85-0.25)*f; out.b=0.60+(1.00-0.60)*f;
+  } else { const f=(t-0.5)/0.5;
+    out.r=0.30+(1.00-0.30)*f; out.g=0.85+(1.00-0.85)*f; out.b=1.00;
+  }
+  return out;
+}
+const _spc={r:1,g:1,b:1};
+
 /* ---------------------------------------------------------------------------
    Particle Tracer für die Strömung (masselose Partikel):
    - feste Anzahl, anfangs zufällig im Gebiet verteilt
@@ -758,15 +783,19 @@ function updateParticles(dt){
     if(!(pX[n]<L)||pX[n]<0||pY[n]<0||pY[n]>W||pZ[n]<bedZ(pY[n])||pZ[n]>WSURF||sp<0.015||sucked||!isFinite(pX[n]))
       seedParticle(n,true);
     const o=n*3; pPos[o]=pX[n]; pPos[o+1]=pZ[n]; pPos[o+2]=pY[n];
-    const c=colNorm(sampleT(pX[n],pY[n],pZ[n]));                // Farbe = lokale Wassertemperatur
+    const c=(PCOLOR==='speed') ? speedColor(sp,_spc)
+                               : colNorm(sampleT(pX[n],pY[n],pZ[n]));
     pCol[o]=c.r; pCol[o+1]=c.g; pCol[o+2]=c.b;
   }
   partGeo.attributes.position.needsUpdate=true;
   partGeo.attributes.color.needsUpdate=true;
 }
 
-/* Kreislauf-Partikel: strömen durch die (durchsichtigen) Rohre und die Pumpe */
-const NCP=900;
+/* Kreislauf-Partikel: strömen durch die (durchsichtigen) Rohre und die Pumpe.
+   Die AKTIVE Anzahl skaliert mit der Rohrquerschnittsfläche (mehr Durchmesser
+   = sichtbar mehr durchströmende Partikel); Puffer für den Maximalfall. */
+const NCP=2200;                        // Puffergröße (Maximum)
+let NCPa=900;                          // aktive Partikelzahl (~ Querschnittsfläche)
 const cpS=new Float32Array(NCP);
 const cpOff=new Float32Array(NCP*3);   // fester Querversatz (Einheitskugel) -> füllt den Rohrquerschnitt
 const cpPos=new Float32Array(NCP*3), cpCol=new Float32Array(NCP*3);
@@ -788,18 +817,24 @@ function updateCircuit(dt){
   if(!circuitPath.length) return;
   const coolFrac=circuitCoolFrac();
   const cWarm=colNorm(tInletLocal), cCold=colNorm(tOutlet);
+  // Geschwindigkeitsmodus: Medium strömt in beiden Rohren mit v = Q/A = v_Ansaug
+  const cSpd=speedColor(P.vSuct,_spc);
   const adv=dt*0.05;                    // Vortriebsgeschwindigkeit entlang des Rohres
-  const off=pipeRadius*0.35;   // deutlich innerhalb der (dickeren) Rohrwand
-  for(let n=0;n<NCP;n++){
+  // Füllung bis knapp an die Innenwand; der sichtbare Sprite-Halbradius
+  // folgt der aktuellen Punktgröße (weiche Disc wirkt ~0,34·size)
+  const off=Math.max(pipeInnerR - circParticles.material.size*0.34, 0.02);
+  for(let n=0;n<NCPa;n++){
     cpS[n]+=adv; if(cpS[n]>=1) cpS[n]-=1;
     samplePath(cpS[n],_cp);
     const o=n*3;
     cpPos[o]  =_cp.x+cpOff[o]  *off;
     cpPos[o+1]=_cp.y+cpOff[o+1]*off;
     cpPos[o+2]=_cp.z+cpOff[o+2]*off;
-    const c=(cpS[n]<coolFrac)?cWarm:cCold;   // nach der Pumpe: abgekühlt
+    const c=(PCOLOR==='speed') ? cSpd
+           : ((cpS[n]<coolFrac)?cWarm:cCold);   // Temp-Modus: nach der Pumpe abgekühlt
     cpCol[o]=c.r; cpCol[o+1]=c.g; cpCol[o+2]=c.b;
   }
+  circGeo.setDrawRange(0, NCPa);
   circGeo.attributes.position.needsUpdate=true;
   circGeo.attributes.color.needsUpdate=true;
 }
@@ -871,13 +906,17 @@ function updateJet(dt){
        jZ[n]<bedZ(jY[n]) || jZ[n]>WSURF || !isFinite(jX[n]))
       seedJet(n,true);
     const o=n*3; jPos[o]=jX[n]; jPos[o+1]=jZ[n]; jPos[o+2]=jY[n];
-    // Farbe = ENTRAINMENT-Mischtemperatur des Strahlwassers:
-    // Im Potentialkern (s < ~6,2·d) ist das Strahlwasser noch unverdünnt bei T_aus;
-    // danach sinkt der Quellwasseranteil wie c ≈ 6,2·d/s (runder Freistrahl).
-    // Umgebung = lokales Feld -> stromab konvergiert die Farbe exakt zur Ebenenfarbe.
-    const cFrac=Math.min(1, 6.2*P.dPipe/Math.max(jS[n],1e-3));
-    const tmix=cFrac*tOutlet + (1-cFrac)*sampleT(jX[n],jY[n],jZ[n]);
-    const c=colNorm(tmix);
+    let c;
+    if(PCOLOR==='speed'){
+      c=speedColor(Math.hypot(mvx,mvy,mvz)/dt,_spc);
+    }else{
+      // Farbe = ENTRAINMENT-Mischtemperatur des Strahlwassers:
+      // Im Potentialkern (s < ~6,2·d) ist das Strahlwasser noch unverdünnt bei T_aus;
+      // danach sinkt der Quellwasseranteil wie c ≈ 6,2·d/s (runder Freistrahl).
+      const cFrac=Math.min(1, 6.2*P.dPipe/Math.max(jS[n],1e-3));
+      const tmix=cFrac*tOutlet + (1-cFrac)*sampleT(jX[n],jY[n],jZ[n]);
+      c=colNorm(tmix);
+    }
     jCol[o]=c.r; jCol[o+1]=c.g; jCol[o+2]=c.b;
   }
   jetGeo.attributes.position.needsUpdate=true;
@@ -941,7 +980,9 @@ function updateSuction(dt){
        sZ[n]<bedZ(sY[n]) || sZ[n]>WSURF || !isFinite(sX[n]))
       seedSuct(n);
     const o=n*3; sPos[o]=sX[n]; sPos[o+1]=sZ[n]; sPos[o+2]=sY[n];
-    const c=colNorm(sampleT(sX[n],sY[n],sZ[n]));     // Farbe = lokale Wassertemperatur
+    const c=(PCOLOR==='speed')
+      ? speedColor(Math.hypot(_vel.u,_vel.v,_vel.w),_spc)
+      : colNorm(sampleT(sX[n],sY[n],sZ[n]));
     sCol[o]=c.r; sCol[o+1]=c.g; sCol[o+2]=c.b;
   }
   suctGeo.attributes.position.needsUpdate=true;
@@ -1331,6 +1372,9 @@ circParticles.visible=document.getElementById('t_stream').checked;
 jetParticles.visible=document.getElementById('t_stream').checked;
 suctParticles.visible=document.getElementById('t_stream').checked;
 document.getElementById('t_water').addEventListener('change',e=>{if(waterMesh)waterMesh.visible=e.target.checked;});
+// Partikelfarb-Modus (Temperatur / Geschwindigkeit)
+document.getElementById('pc_temp').addEventListener('change',e=>{ if(e.target.checked) PCOLOR='temp'; });
+document.getElementById('pc_speed').addEventListener('change',e=>{ if(e.target.checked) PCOLOR='speed'; });
 document.getElementById('t_iso').addEventListener('change',e=>{ if(!isoGroup)buildIso(); isoGroup.visible=e.target.checked; });
 document.getElementById('t_grid').addEventListener('change',e=>{ if(e.target.checked && gridGroup.children.length===0) buildGrid(); gridGroup.visible=e.target.checked; });
 document.getElementById('t_flow').addEventListener('change',e=>{ if(!flowGroup)buildFlow(); flowGroup.visible=e.target.checked; });
@@ -1372,7 +1416,7 @@ function updateKPI(){
     if(mx<0.05){recX=(i+0.5)*dx;break;}
   }
   const recLen=Math.max(recX-X_OUT,0);
-  // Energiebilanz: Flussdurchfluss (parabolischer Querschnitt) und durchmischte Abkühlung
+  // Energiebilanz: Flussdurchfluss (parabolischnitt) und durchmischte Abkühlung
   const Ariver = (2/3)*W*P.depth;                 // Fläche der Parabel
   const Qriver = Ariver * P.vFlow;                 // Volumenstrom Fluss [m³/s]
   const dTmix  = (D.Pextract*1000)/(RHO*CP*Math.max(Qriver,1e-6)); // P_entzug/(ρ·c_p·Q_Fluss)
@@ -1412,6 +1456,23 @@ function drawColorbar(){
   for(let i=0;i<5;i++){
     const t=Tmax-(Tmax-Tmin)*i/4;
     const s=document.createElement('span'); s.textContent=fmt(t,1); ticks.appendChild(s);
+  }
+}
+/* zweite Legende: Partikelgeschwindigkeit, FESTE Skala 0 … 3 m/s
+   (Farbverlauf identisch zu speedColor: kühles Weiß, schneller = heller) */
+function drawVbar(){
+  const vb=document.getElementById('vbar'), vx=vb.getContext('2d');
+  const c={r:0,g:0,b:0};
+  for(let y=0;y<vb.height;y++){
+    const sp=(1-y/vb.height)*VMAX_SCALE;
+    speedColor(sp,c);
+    vx.fillStyle=`rgb(${c.r*255|0},${c.g*255|0},${c.b*255|0})`;
+    vx.fillRect(0,y,vb.width,1);
+  }
+  const ticks=document.getElementById('vbarTicks'); ticks.innerHTML='';
+  for(let i=0;i<5;i++){
+    const v=VMAX_SCALE*(1-i/4);
+    const s=document.createElement('span'); s.textContent=fmt(v,2); ticks.appendChild(s);
   }
 }
 
@@ -1930,7 +1991,7 @@ function init(){
   refreshLabels(); refreshDerived();
   relax(80);              // Anfangsfeld einschwingen
   fieldStats(); buildIso(); buildFlow();
-  resize(); setView('oblique'); drawColorbar();
+  resize(); setView('oblique'); drawColorbar(); drawVbar();
   updateGridInfo(+document.getElementById('gridRes').value);
   Object.entries(TG).forEach(([id,obj])=>obj.visible=document.getElementById(id).checked);
   circParticles.visible=document.getElementById('t_stream').checked;
